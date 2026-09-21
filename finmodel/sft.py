@@ -17,7 +17,7 @@ from .tracking import SwanLabRun
 class SFTSplit:
     training_dates: tuple[int, ...]
     validation_dates: tuple[int, ...]
-    boundary_excluded_date: int
+    boundary_excluded_date: int | None
 
 
 def load_config(path: str | Path) -> dict[str, Any]:
@@ -29,8 +29,14 @@ def sft_split(panel, config: dict[str, Any]) -> SFTSplit:
     dates = np.asarray(panel.dates, dtype=np.int64)
     if dates.ndim != 1 or not len(dates) or not np.all(dates[:-1] < dates[1:]):
         raise ValueError("panel dates must be non-empty and strictly increasing")
-    boundary = int(config["boundary_excluded_date"])
-    if boundary not in set(int(value) for value in dates):
+    boundary_value = config.get("boundary_excluded_date")
+    boundary = None if boundary_value is None else int(boundary_value)
+    if boundary is None and not bool(config.get("allow_adjacent_train_validation", False)):
+        raise ValueError(
+            "boundary_excluded_date may be null only when "
+            "allow_adjacent_train_validation=true"
+        )
+    if boundary is not None and boundary not in set(int(value) for value in dates):
         raise ValueError(f"boundary date {boundary} is absent from panel")
     training = dates[dates <= int(config["tuning_train_end"])]
     validation = dates[
@@ -42,7 +48,7 @@ def sft_split(panel, config: dict[str, Any]) -> SFTSplit:
         raise ValueError(f"expected {expected} validation dates, found {len(validation)}")
     if not len(training):
         raise ValueError("training split is empty")
-    if boundary in training or boundary in validation:
+    if boundary is not None and (boundary in training or boundary in validation):
         raise AssertionError("label-leaking boundary date was not isolated")
     if int(training[-1]) >= int(validation[0]):
         raise AssertionError("training and validation are not temporally disjoint")
@@ -116,14 +122,6 @@ def cosine_learning_rate(
     progress = (update - warmup_updates - 1) / max(remaining - 1, 1)
     cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
     return float(base_lr) * (eta_min_ratio + (1.0 - eta_min_ratio) * cosine)
-
-
-@torch.no_grad()
-def update_ema_model(ema_model: torch.nn.Module, model: torch.nn.Module, decay: float) -> None:
-    for ema_parameter, parameter in zip(ema_model.parameters(), model.parameters()):
-        ema_parameter.mul_(decay).add_(parameter.detach(), alpha=1.0 - decay)
-    for ema_buffer, buffer in zip(ema_model.buffers(), model.buffers()):
-        ema_buffer.copy_(buffer.detach())
 
 
 def reset_peak_memory(device: torch.device) -> None:

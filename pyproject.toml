@@ -1,7 +1,7 @@
 [project]
-name = "stockmixer-soft-final"
-version = "1.0.0"
-description = "Leakage-safe StockMixer training with a differentiable competition-score proxy"
+name = "stock-time-transformer-b0"
+version = "2.0.0"
+description = "Causal cross-sectional Stock-Time Transformer for competition-score optimization"
 requires-python = ">=3.10"
 dependencies = [
   "numpy>=1.21",
@@ -11,7 +11,7 @@ dependencies = [
 ]
 
 [project.urls]
-"StockMixer upstream" = "https://github.com/SJTU-DMTai/StockMixer"
+Repository = "https://github.com/zeta172417-design/financial_modeling"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

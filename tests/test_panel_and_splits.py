@@ -34,6 +34,21 @@ class PanelTests(unittest.TestCase):
             1e-3,
         )
 
+    def test_sft_split_can_use_all_train_dates_before_test_validation(self):
+        dates = np.asarray([20241230, 20241231, 20250102, 20250103])
+        config = {
+            "tuning_train_end": 20241231,
+            "boundary_excluded_date": None,
+            "allow_adjacent_train_validation": True,
+            "validation_start": 20250102,
+            "validation_end": 20250103,
+            "validation_days": 2,
+        }
+        split = sft_split(SimpleNamespace(dates=dates), config)
+        self.assertEqual(split.training_dates, (20241230, 20241231))
+        self.assertEqual(split.validation_dates, (20250102, 20250103))
+        self.assertIsNone(split.boundary_excluded_date)
+
     def test_causal_fill_and_future_independence(self):
         dates = [20180102, 20180103, 20180104, 20180105]
         rows = []

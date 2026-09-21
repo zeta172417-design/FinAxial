@@ -19,27 +19,23 @@ evaluation/*.csv
 *.zip
 *.bundle
 
-# Downloaded model weights (root directory only; keep finmodel/models source)
+# Downloaded model weights
 /models/
 *.safetensors
 
 # Generated experiment artifacts
 artifacts/*
-!artifacts/stockmixer_sft_current/
-artifacts/stockmixer_sft_current/*
-!artifacts/stockmixer_sft_current/README.md
-!artifacts/stockmixer_sft_current/training_config.source.json
-!artifacts/stockmixer_sft_current/best/
-artifacts/stockmixer_sft_current/best/*
-!artifacts/stockmixer_sft_current/best/model.pt
-!artifacts/stockmixer_sft_current/best/metadata.json
-!artifacts/stockmixer_sft_current/results/
-artifacts/stockmixer_sft_current/results/*
-!artifacts/stockmixer_sft_current/results/final_only_lb64_ep20/
-artifacts/stockmixer_sft_current/results/final_only_lb64_ep20/*
-!artifacts/stockmixer_sft_current/results/final_only_lb64_ep20/complete.json
-!artifacts/stockmixer_sft_current/results/final_only_lb64_ep20/train_summary.json
-!artifacts/stockmixer_sft_current/results/final_only_lb64_ep20/validation_history.json
+!artifacts/stock_time_transformer_b0/
+artifacts/stock_time_transformer_b0/*
+!artifacts/stock_time_transformer_b0/README.md
+!artifacts/stock_time_transformer_b0/best/
+artifacts/stock_time_transformer_b0/best/*
+!artifacts/stock_time_transformer_b0/best/model.pt
+!artifacts/stock_time_transformer_b0/best/metadata.json
+!artifacts/stock_time_transformer_b0/train_summary.json
+!artifacts/stock_time_transformer_b0/validation_history.json
+!artifacts/stock_time_transformer_b0/context_position_metrics.csv
+!artifacts/stock_time_transformer_b0/context_position_metrics.json
 
 # Local tracking and logs
 swanlog*/
@@ -48,8 +44,3 @@ swanlog*/
 
 # Official competition document is not redistributed
 docs/*.pdf
-
-# Nested upstream datasets are fetched from their own repositories but ignored
-# if copied into a vendored checkout.
-third_party/StockMixer/dataset/
-third_party/Kronos/
