@@ -1,0 +1,29 @@
+{
+  "artifact_role": "current_best_sft",
+  "model": "StockMixerReturn",
+  "stocks": 4650,
+  "channels": 6,
+  "lookback": 64,
+  "loss": "negative_soft_final_only",
+  "mse_weight": 0.0,
+  "parameter_source": "ema",
+  "epoch": 20,
+  "optimizer_update": 1960,
+  "selection": "highest_5_epoch_trailing_mean_exact_ema_final_score",
+  "validation_period": [20240708, 20241231],
+  "validation_days": 120,
+  "score_components": {
+    "final_score": 0.323958126614069,
+    "rank_ic": 0.0471290956750299,
+    "annual_excess": 0.25448392035614237,
+    "one_minus_turnover": 0.7625377074573811,
+    "mse_diagnostic_only": 1.851737297761069,
+    "mae_diagnostic_only": 1.0905840729560654,
+    "coverage": 0.9898387096774194
+  },
+  "stable_validation_final_score": 0.3227935765910191,
+  "stable_validation_final_score_std": 0.0010693435055381675,
+  "source_protocol": "stockmixer_sft_v3_ep20_lb64_soft_final_only",
+  "sha256": "10692c8145083699675c7084379d322d569862ba26e0764ad0d2c8bb2c2d854c",
+  "note": "MSE and MAE are logged diagnostics only and are not part of the training loss"
+}

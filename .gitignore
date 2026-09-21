@@ -1,0 +1,55 @@
+# Python and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+.deps/
+
+# Editors and OS files
+.idea/
+.vscode/
+.DS_Store
+
+# Raw/reconstructed competition data (not redistributed)
+data/raw/*.csv
+data/raw/*.zip
+evaluation/*.csv
+*.zip
+*.bundle
+
+# Downloaded model weights (root directory only; keep finmodel/models source)
+/models/
+*.safetensors
+
+# Generated experiment artifacts
+artifacts/*
+!artifacts/stockmixer_sft_current/
+artifacts/stockmixer_sft_current/*
+!artifacts/stockmixer_sft_current/README.md
+!artifacts/stockmixer_sft_current/training_config.source.json
+!artifacts/stockmixer_sft_current/best/
+artifacts/stockmixer_sft_current/best/*
+!artifacts/stockmixer_sft_current/best/model.pt
+!artifacts/stockmixer_sft_current/best/metadata.json
+!artifacts/stockmixer_sft_current/results/
+artifacts/stockmixer_sft_current/results/*
+!artifacts/stockmixer_sft_current/results/final_only_lb64_ep20/
+artifacts/stockmixer_sft_current/results/final_only_lb64_ep20/*
+!artifacts/stockmixer_sft_current/results/final_only_lb64_ep20/complete.json
+!artifacts/stockmixer_sft_current/results/final_only_lb64_ep20/train_summary.json
+!artifacts/stockmixer_sft_current/results/final_only_lb64_ep20/validation_history.json
+
+# Local tracking and logs
+swanlog*/
+*.swanlab
+*.log
+
+# Official competition document is not redistributed
+docs/*.pdf
+
+# Nested upstream datasets are fetched from their own repositories but ignored
+# if copied into a vendored checkout.
+third_party/StockMixer/dataset/
+third_party/Kronos/

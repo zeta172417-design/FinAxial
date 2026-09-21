@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "source": "data/raw/测试集_X.csv",
+  "source_sha256": "dceffbf68bbab07a254bc6caa4d8a1e33de8de9c15489d936c5d15020dbfa90f",
+  "formula": "y_ret_1d(t) = close(t+1) / close(t) - 1",
+  "excluded_date": 20260608,
+  "date_min": 20250102,
+  "date_max": 20260605,
+  "dates": 343,
+  "stocks": 4650,
+  "rows": 1594950,
+  "label_missing": 45515,
+  "train_formula_check_rows": 19770,
+  "train_formula_max_abs_diff": 5.421010862427522e-16,
+  "x_sha256": "0815ed57b4724d7f21db40ce8c5deb379612ff004ad543df2c156086ce12e32f",
+  "y_sha256": "cd8e1b6bd933519ef717ada84658a23bcc3ed149bf2f0560eb99fcfe41317f7c"
+}
