@@ -25,17 +25,21 @@ evaluation/*.csv
 
 # Generated experiment artifacts
 artifacts/*
-!artifacts/stock_time_transformer_b0/
-artifacts/stock_time_transformer_b0/*
-!artifacts/stock_time_transformer_b0/README.md
-!artifacts/stock_time_transformer_b0/best/
-artifacts/stock_time_transformer_b0/best/*
-!artifacts/stock_time_transformer_b0/best/model.pt
-!artifacts/stock_time_transformer_b0/best/metadata.json
-!artifacts/stock_time_transformer_b0/train_summary.json
-!artifacts/stock_time_transformer_b0/validation_history.json
-!artifacts/stock_time_transformer_b0/context_position_metrics.csv
-!artifacts/stock_time_transformer_b0/context_position_metrics.json
+!artifacts/finaxial_c0/
+artifacts/finaxial_c0/*
+!artifacts/finaxial_c0/README.md
+!artifacts/finaxial_c0/seed_2026/
+!artifacts/finaxial_c0/seed_2027/
+!artifacts/finaxial_c0/seed_2028/
+artifacts/finaxial_c0/seed_*/*
+!artifacts/finaxial_c0/seed_*/model.pt
+!artifacts/finaxial_c0/seed_*/metadata.json
+!artifacts/finaxial_c0/seed_*/train_summary.json
+!artifacts/finaxial_c0/seed_*/validation_history.json
+!artifacts/finaxial_c0/evaluation/
+artifacts/finaxial_c0/evaluation/*
+!artifacts/finaxial_c0/evaluation/evaluation_results.json
+!artifacts/finaxial_c0/evaluation/evaluation_summary.csv
 
 # Local tracking and logs
 swanlog*/

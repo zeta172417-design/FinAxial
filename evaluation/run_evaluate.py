@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate a submission's keys and then call the official evaluator."""
+"""Validate a prediction file's keys and then call the reference evaluator."""
 
 from __future__ import annotations
 

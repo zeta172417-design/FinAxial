@@ -1,5 +1,5 @@
 '''
-量化比赛测试集评分脚本
+金融截面预测评分脚本
 评价指标: Rank IC(40%) + Top组超额收益(30%) + 预测换手率(30%)
 '''
 import numpy as np
@@ -13,13 +13,13 @@ except ImportError:  # Keep the official evaluator runnable in the locked PPU en
     logger = logging.getLogger(__name__)
 
 
-def evaluate(_submission_path: str, _data_dir: str = '/home/quant6/data/比赛') -> dict:
+def evaluate(_submission_path: str, _data_dir: str = '.') -> dict:
     '''
     计算综合评分
 
     参数:
         _submission_path: submission.csv 路径 (ts_code, trade_date, pred)
-        _data_dir: 比赛数据目录
+        _data_dir: 测评数据目录
 
     返回:
         各指标及综合得分字典
@@ -121,7 +121,7 @@ def evaluate(_submission_path: str, _data_dir: str = '/home/quant6/data/比赛')
 
 
 if __name__ == '__main__':
-    submission_path = '/home/quant6/data/比赛/submission.csv'
+    submission_path = 'submission.csv'
     result = evaluate(submission_path)
     print('\n===== 评分结果 =====')
     for m_key, m_val in result.items():

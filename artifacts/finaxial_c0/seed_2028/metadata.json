@@ -1,0 +1,41 @@
+{
+  "architecture": {
+    "architecture": "interleaved_axial",
+    "attention_dropout": 0.0,
+    "channels": 6,
+    "context_days": 32,
+    "d_model": 128,
+    "dropout": 0.1,
+    "ffn_dim": 512,
+    "heads": 4,
+    "lookback": 64,
+    "output_steps": 64,
+    "stock_embedding_dim": 32,
+    "stock_id_dropout": 0.1,
+    "stock_layers": 2,
+    "temporal_layers": 2,
+    "temporal_window": 64
+  },
+  "epoch": 30,
+  "model": "finaxial_c0",
+  "optimizer_update": 180,
+  "parameter_source": "raw",
+  "score_components": {
+    "annual_excess": 0.20746001430045538,
+    "annual_excess_x_0.3": 0.06223800429013661,
+    "coverage": 0.9984353289968583,
+    "final_score": 0.3507666922460777,
+    "ic_positive_ratio": 0.7325102880658436,
+    "icir": 0.6620050991290622,
+    "mae": 1.275869350600763,
+    "mse": 3.348668983011237,
+    "one_minus_turnover": 0.86954262714165,
+    "rank_ic": 0.0691647495336153,
+    "rank_ic_x_0.4": 0.027665899813446124,
+    "stability_x_0.3": 0.260862788142495
+  },
+  "stable_validation_final_score": 0.35082779531799146,
+  "stable_validation_final_score_std": 9.742775373590957e-05,
+  "stock_vocab_sha256": "6a45c674ce0b3e1c0015476fb47d37425a5dfac376064d5e6890924846b6a590",
+  "validation_final_score": 0.3507666922460777
+}

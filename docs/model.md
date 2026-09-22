@@ -1,40 +1,45 @@
-# Stock-Time Transformer B0
+# FinAxial C0 architecture
 
-## 固定架构
+## Input and causality
 
-- 输入：4,650只股票，96个日期，6个OHLCVA通道。
-- 因果归一化：每个token独立使用截至自身日期的trailing-64统计量。
-- Burn-in：前32个日期不直接计算loss。
-- 并行监督：后64个日期输出`[64, 4650]`收益排序信号。
-- Temporal Encoder：2层、`d_model=96`、4 heads、FFN 384、RoPE、64-token sliding causal mask。
-- Stock Encoder：每日共享2层全截面self-attention，无股票位置编码。
-- 公司身份：32维可学习stock embedding，训练时10%替换为UNK。
-- 输出：LayerNorm和无bias线性头；每日在eligible股票上做截面中心化。
+FinAxial C0 consumes the complete stock universe as one cross-sectional sample. Each input has
+96 date tokens: 32 burn-in dates and 64 supervised dates. Every OHLCVA token is normalized with
+statistics from its own trailing 64-date history only. Missing pre-listing history remains invalid;
+other missing OHLC values use the previous close while volume and amount are zero-filled.
 
-Stock Attention参数由所有日期共享。模型不会一次预测未知的未来64天；训练时64个输出对应64个
-已有行情日期，并且每个输出只能访问自身及更早token。真实推理只使用截至当前日的最后一个输出。
+The model never treats the 64 outputs as unknown future dates. During training they are 64 known,
+consecutive historical dates processed in parallel, and the causal temporal mask prevents an earlier
+output from reading a later token. Live inference uses the last output available at the current date.
 
-## 数据与mask
+## Network
 
-- OHLC停牌缺失使用此前最近收盘价，vol/amount置零；上市前保持无效。
-- 标签为`close(t+1) / close(t) - 1`。
-- Rank IC使用全部有标签股票。
-- Top 10%收益和换手率排除涨停股票，与官方评分实现一致。
-- 每个block包含63个相邻日期soft Jaccard，不跨股票或日期拼接序列。
+- Feature projection: 6 channels to `d_model=128`.
+- Stock identity: 32-dimensional learned embedding projected to 128 dimensions and injected through
+  a feature-dependent sigmoid gate. Ten percent of identities are replaced by an UNK embedding in
+  training.
+- Temporal attention: two sliding causal self-attention blocks, four heads, RoPE, window 64.
+- Stock attention: two shared full-cross-section blocks without stock positional encodings.
+- Axial order: Temporal 1, Stock 1, Temporal 2, then Stock 2 on the 64 supervised dates.
+- FFN width: 512. Dropout: 0.1. Attention dropout: 0.
+- Head: LayerNorm and a bias-free scalar projection followed by eligible-stock centering.
+- Parameters: 964,064.
 
-## 训练设置
+The absence of stock positional encodings makes stock attention permutation equivariant. Company
+identity is carried by the explicit vocabulary embedding, whose ordered vocabulary SHA-256 is stored
+with every checkpoint.
 
-- AdamW，LR `3e-4`，weight decay `0.05`。
-- 5 epochs线性warmup，其后cosine decay至基础LR的1%。
-- 梯度裁剪1.0，30 epochs，8卡DDP。
-- 训练stride 32，共51个block；drop-last后每卡每轮6次更新。
-- 参数EMA关闭；raw Final连续3轮均值选择checkpoint。
-- SwanLab项目：`financial-modeling-stock-time-transformer`。
+## Objective and optimization
 
-选定checkpoint是epoch 23（optimizer update 138），峰值PPU显存约20.71 GiB。
+The differentiable objective combines daily soft Rank IC, bounded soft Top-10% annualized excess,
+and adjacent-date soft portfolio stability with weights 0.4, 0.3, and 0.3. Rank temperature anneals
+from 0.20 to 0.05 and portfolio temperature from 0.04 to 0.01 during the first 20 epochs.
 
-## 为什么保留B0
+Training uses AdamW, learning rate `3e-4`, weight decay `0.05`, gradient clipping at 1.0, five linear
+warmup epochs, and cosine decay to 1% of the initial rate. Checkpoints are selected by the trailing
+three-evaluation mean of the exact raw composite score on the development period.
 
-完整343日评测中，B0 Final为0.328791。增加后置Temporal Decoder的B1只有0.320384；它虽可提高
-长历史位置的Rank IC，却导致换手恶化。严格同日期对照进一步显示B0在约64日历史处饱和，因此正式
-模型保留B0且不继续扩大时间窗口。
+## Saved model family
+
+The repository stores seeds 2026, 2027, and 2028. The recommended robust inference path converts
+each model output to a same-date percentile rank and averages the three ranks. A fixed causal signal
+EWMA with alpha 0.25 is reported separately and is not part of the checkpoint weights.

@@ -1,7 +1,7 @@
 [project]
-name = "stock-time-transformer-b0"
+name = "finaxial"
 version = "2.0.0"
-description = "Causal cross-sectional Stock-Time Transformer for competition-score optimization"
+description = "Causal axial Transformer for cross-sectional financial forecasting"
 requires-python = ">=3.10"
 dependencies = [
   "numpy>=1.21",
@@ -11,7 +11,7 @@ dependencies = [
 ]
 
 [project.urls]
-Repository = "https://github.com/zeta172417-design/financial_modeling"
+Repository = "https://github.com/zeta172417-design/FinAxial"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

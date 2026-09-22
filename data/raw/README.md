@@ -1,15 +1,12 @@
-# 官方原始数据
+# Local market data
 
-本目录只保留代码实际使用的两个 CSV，不做原地修改：
+This directory contains local inputs and is excluded from version control.
 
-| 文件 | 字节数 | ZIP 中的 CRC32 | 用途 |
+| File | Bytes | Date coverage | Purpose |
 |---|---:|---|---|
-| `训练集.csv` | 946,832,276 | `5f83ecf8` | 2018-01-02 至 2024-12-31，有 `y_ret_1d` |
-| `测试集_X.csv` | 168,825,396 | `ea870307` | 2025-01-02 至 2026-06-08，无标签 |
+| `训练集.csv` | 946,832,276 | 2018-01-02 to 2024-12-31 | Labelled training history |
+| `测试集_X.csv` | 168,825,396 | 2025-01-02 to 2026-06-08 | Unlabelled feature history |
 
-2026-09-19 清理时逐块计算了两个解压文件的大小和 CRC32，均与
-`赛题五数据.zip` 中央目录记录完全一致。因此冗余 ZIP 已删除；删除 ZIP 不影响复现、
-训练或官方测试集预测。
-
-测试集共有 1,599,600 行、4,650 只股票、344 个交易日。正式提交必须为每个
-`(ts_code, trade_date)` 唯一输出一行预测。
+The preprocessing pipeline reads these files without modifying them. The feature file contains
+1,599,600 rows, 4,650 stocks, and 344 dates. Generated labels, panels, and predictions remain local
+under `evaluation/` and `artifacts/`.

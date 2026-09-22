@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train the canonical B0 Stock-Time Transformer."""
+"""Train the canonical FinAxial C0 model."""
 
 from __future__ import annotations
 
@@ -28,7 +28,11 @@ from finmodel.io import atomic_json_dump, seed_everything
 from finmodel.metrics import add_causal_ewma, evaluate_frame, make_prediction_frame
 from finmodel.models.stock_time_transformer import StockTimeTransformer, stock_vocab_sha256
 from finmodel.panel import Panel
-from finmodel.objective import compose_bounded_final_score, multi_date_soft_components
+from finmodel.objective import (
+    compose_bounded_final_score,
+    multi_date_soft_components,
+    objective_settings,
+)
 from finmodel.sequence import MultiDateCrossSectionDataset
 from finmodel.sft import (
     cosine_learning_rate,
@@ -70,7 +74,7 @@ def save_checkpoint(
 ) -> None:
     save_torch_checkpoint(model, directory, {
         **metadata,
-        "model": "stock_time_transformer_b0",
+        "model": "finaxial_c0",
         "architecture": architecture,
         "stock_vocab_sha256": vocabulary_hash,
     })
@@ -120,16 +124,18 @@ def distributed_validation(
     lookup = {int(date): offset for offset, date in enumerate(requested)}
     predictions = np.full((len(requested), stocks), np.nan, dtype=np.float32)
     eligibility = np.zeros((len(requested), stocks), dtype=bool)
+    selected_output_position = np.full(len(requested), -1, dtype=np.int16)
     for gathered, eligible, dates in zip(
         gathered_predictions, gathered_eligible, gathered_dates,
     ):
         for block in range(max_count):
             for step, date_idx in enumerate(dates[block].cpu().tolist()):
                 position = lookup.get(int(date_idx))
-                if position is None:
+                if position is None or step <= selected_output_position[position]:
                     continue
                 predictions[position] = gathered[block, step].cpu().numpy()
                 eligibility[position] = eligible[block, step].cpu().numpy().astype(bool)
+                selected_output_position[position] = step
     if not np.isfinite(predictions).all():
         raise RuntimeError("distributed validation did not cover every requested date")
 
@@ -139,7 +145,7 @@ def distributed_validation(
             date_indices=requested,
             predictions=predictions,
             eligible=eligibility,
-            model="stock_time_transformer_b0",
+            model="finaxial_c0",
             route=f"{route}_{suffix}",
             fold="validation",
             alpha=1.0,
@@ -205,6 +211,7 @@ def main() -> None:
         min_history=int(config["min_history"]),
         epsilon=float(data["normalization_epsilon"]),
         clip=float(data["normalization_clip"]),
+        feature_mode=str(data.get("feature_mode", "temporal")),
     )
     validation_dataset = MultiDateCrossSectionDataset(
         panel, validation_indices,
@@ -215,7 +222,14 @@ def main() -> None:
         min_history=int(config["min_history"]),
         epsilon=float(data["normalization_epsilon"]),
         clip=float(data["normalization_clip"]),
+        feature_mode=str(data.get("feature_mode", "temporal")),
     )
+    configured_channels = int(config["model"]["channels"])
+    if train_dataset.channels != configured_channels:
+        raise ValueError(
+            f"feature_mode {train_dataset.feature_mode!r} produces "
+            f"{train_dataset.channels} channels, but model.channels={configured_channels}"
+        )
     if args.limit_train_blocks:
         train_dataset.output_blocks = train_dataset.output_blocks[-args.limit_train_blocks:]
     if args.limit_validation_blocks:
@@ -253,14 +267,14 @@ def main() -> None:
 
     route = str(training["route_name"])
     name = job_name(
-        "tuning", "stock-time-transformer-b0", route,
+        "training", "finaxial-c0", route,
         int(config["model"]["lookback"]), seed,
         budget=f"k{config['model']['output_steps']}-ep{epochs}-ddp{world_size}",
     )
     tracker_context = swan_settings(
         config,
         name=name,
-        tags=["tuning", "stock-time-transformer-b0", "multi-date", "final-global"],
+        tags=["training", "finaxial-c0", "multi-date", "final-global"],
         extra={
             "world_size": world_size,
             "epochs": epochs,
@@ -287,7 +301,8 @@ def main() -> None:
             for epoch in range(1, epochs + 1):
                 sampler.set_epoch(epoch)
                 ddp_model.train()
-                interval = np.zeros(9, dtype=np.float64)
+                loss_settings = objective_settings(training, epoch)
+                interval = np.zeros(10, dtype=np.float64)
                 interval_count = 0
                 interval_started = time.perf_counter()
                 for step, item in enumerate(loader, start=1):
@@ -302,8 +317,8 @@ def main() -> None:
                         item["target"].to(device).squeeze(0),
                         item["mask"].to(device).squeeze(0),
                         item["tradable"].to(device).squeeze(0),
-                        rank_temperature=float(training["rank_temperature"]),
-                        top_temperature=float(training["top_temperature"]),
+                        rank_temperature=loss_settings.rank_temperature,
+                        top_temperature=loss_settings.top_temperature,
                     )
                     global_rank = global_mean_with_local_gradient(components.rank_ic)
                     global_excess = global_mean_with_local_gradient(components.annual_excess_raw)
@@ -315,9 +330,31 @@ def main() -> None:
                         global_stability=global_stability,
                         excess_bound=float(training["excess_bound"]),
                         mse_weight=float(training["mse_weight"]),
+                        component_weights=loss_settings.component_weights,
+                        range_balance_beta=loss_settings.range_balance_beta,
+                    )
+                    official_soft_score = (
+                        0.4 * global_rank
+                        + 0.3 * bounded_excess
+                        + 0.3 * global_stability
                     )
                     if not torch.isfinite(loss):
                         raise FloatingPointError(f"non-finite loss epoch={epoch} step={step}")
+                    if step == 1:
+                        proxy_values = []
+                        for component in (global_rank, bounded_excess, global_stability):
+                            gradient = torch.autograd.grad(
+                                component, prediction,
+                                retain_graph=True, allow_unused=True,
+                            )[0]
+                            proxy_values.append(
+                                torch.zeros((), device=device)
+                                if gradient is None else gradient.float().norm()
+                                / max(gradient.numel() ** 0.5, 1.0)
+                            )
+                        proxy = torch.stack(proxy_values)
+                        dist.all_reduce(proxy, op=dist.ReduceOp.SUM)
+                        proxy /= world_size
                     loss.backward()
                     grad_norm = torch.nn.utils.clip_grad_norm_(
                         ddp_model.parameters(), float(training["gradient_clip"]),
@@ -343,9 +380,10 @@ def main() -> None:
 
                     values = np.asarray([
                         float(loss.detach()), float(soft_score.detach()),
-                        float(global_rank.detach()), float(global_excess.detach()),
-                        float(bounded_excess.detach()), float(global_stability.detach()),
-                        float(components.mse.detach()), float(grad_norm), learning_rate,
+                        float(official_soft_score.detach()), float(global_rank.detach()),
+                        float(global_excess.detach()), float(bounded_excess.detach()),
+                        float(global_stability.detach()), float(components.mse.detach()),
+                        float(grad_norm), learning_rate,
                     ])
                     interval += values
                     interval_count += 1
@@ -360,14 +398,21 @@ def main() -> None:
                         if rank == 0:
                             tracker.log({
                                 "train/loss": means[0],
-                                "train/soft_final": means[1],
-                                "train/soft_rank_ic": means[2],
-                                "train/soft_annual_excess_raw": means[3],
-                                "train/soft_annual_excess_bounded": means[4],
-                                "train/soft_one_minus_turnover": means[5],
-                                "train/mse_diagnostic": means[6],
-                                "train/grad_norm": means[7],
-                                "train/lr": means[8],
+                                "train/objective_score": means[1],
+                                "train/soft_final_official": means[2],
+                                "train/soft_rank_ic": means[3],
+                                "train/soft_annual_excess_raw": means[4],
+                                "train/soft_annual_excess_bounded": means[5],
+                                "train/soft_one_minus_turnover": means[6],
+                                "train/mse_diagnostic": means[7],
+                                "train/grad_norm": means[8],
+                                "train/lr": means[9],
+                                "train/rank_temperature": loss_settings.rank_temperature,
+                                "train/top_temperature": loss_settings.top_temperature,
+                                "train/rank_weight": loss_settings.component_weights[0],
+                                "train/excess_weight": loss_settings.component_weights[1],
+                                "train/stability_weight": loss_settings.component_weights[2],
+                                "train/range_balance_beta": loss_settings.range_balance_beta,
                                 "train/epoch": epoch,
                                 "train/optimizer_update": global_update,
                                 "train/dates_per_global_update": (
@@ -377,6 +422,13 @@ def main() -> None:
                                     time.perf_counter() - interval_started, 1e-9,
                                 ),
                             }, step=global_update)
+                            if step == 1:
+                                tracker.log({
+                                    "train/gradient_proxy/rank_prediction": float(proxy[0]),
+                                    "train/gradient_proxy/excess_prediction": float(proxy[1]),
+                                    "train/gradient_proxy/stability_prediction": float(proxy[2]),
+                                    "train/gradient_proxy/epoch": epoch,
+                                }, step=global_update)
                         interval[:] = 0
                         interval_count = 0
                         interval_started = time.perf_counter()
@@ -473,6 +525,9 @@ def main() -> None:
                     "sequence_length": model.sequence_length,
                     "dates_per_global_update": world_size * int(config["model"]["output_steps"]),
                     "training_objective": "multi_date_final_global_excess",
+                    "loss_variant": str(training.get("loss_variant", "official")),
+                    "feature_mode": str(data.get("feature_mode", "temporal")),
+                    "architecture": str(config["model"].get("architecture", "stacked")),
                     "checkpoint_selection": (
                         f"highest_{smoothing_epochs}_epoch_trailing_mean_"
                         "raw_final_score"

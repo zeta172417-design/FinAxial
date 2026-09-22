@@ -1,50 +1,81 @@
-# Stock-Time Transformer B0
+# FinAxial C0
 
-本仓库保留赛题五实验最终选定的唯一模型：Stock-Time Transformer B0。旧 StockMixer、Kronos、
-V1/V2-A/K16 和 B1 实现及权重均已移除。
+FinAxial 是面向大规模股票截面的因果轴向 Transformer。C0 同时建模单只股票的时间依赖与同一日期的跨股票关系，并直接优化由排序能力、Top 10% 超额收益和组合稳定性组成的可微目标。
 
-## 模型
+本仓库提供模型实现、三组可复现权重、因果数据处理、训练脚本、参考测评器和完整测试结果。原始行情数据、重构标签、memmap 面板与在线实验缓存不随仓库发布。
 
-B0 接收完整股票截面，使用32个burn-in日期和64个连续监督日期：
+## 架构
+
+C0 每个样本包含 4,650 只股票、32 个 burn-in 日期和 64 个并行监督日期：
 
 ```text
 OHLCVA [stocks, 96, 6]
-  -> 每个token的trailing-64因果z-score
-  -> 2层sliding causal Temporal Attention + RoPE
-  -> 最后64个日期
-  -> 每日共享的2层Stock Attention（股票轴无位置编码）
-  -> 64个日截面收益排序信号
+  -> 每个 token 的 trailing-64 因果 z-score
+  -> 特征投影 + 门控公司 embedding
+  -> Temporal Attention 1（RoPE、sliding causal mask）
+  -> Stock Attention 1（同日全截面、无股票位置编码）
+  -> Temporal Attention 2
+  -> 最后 64 日共享 Stock Attention 2
+  -> LayerNorm + 线性头
+  -> [64, 4650] 截面排序信号
 ```
 
-训练目标直接近似比赛综合分：
+主要规格：
+
+- `d_model=128`，4 heads，FFN 512；
+- 2 个 Temporal block 与 2 个 Stock block，交错轴向排列；
+- 公司 embedding 为 32 维，通过学习门控加入行情 token；
+- 共 964,064 个参数；
+- 时间注意力使用 RoPE，股票注意力不使用位置编码；
+- 所有输出严格因果，日期 `t` 的预测看不到 `t` 之后的输入。
+
+训练目标为：
 
 ```text
-soft_final = 0.4 * mean(daily_soft_rank_ic)
-           + 0.3 * bounded(mean(daily_annual_excess))
-           + 0.3 * mean(63 adjacent soft_jaccard)
-loss = -soft_final
+soft_score = 0.4 * soft_rank_ic
+           + 0.3 * bounded_soft_top10_annual_excess
+           + 0.3 * soft_portfolio_stability
+loss = -soft_score
 ```
 
-模型共609,728个参数。参数EMA已取消，checkpoint按raw Final连续3轮均值选择；信号端固定额外报告
-`alpha=0.25`的因果EWMA。详细结构和指标见[模型文档](docs/model.md)。
+Rank 与 Top 10% 的 soft temperature 在前 20 epochs 余弦退火。训练使用 AdamW、`3e-4` 学习率、5 epochs warmup、cosine decay、weight decay `0.05`，最多 30 epochs。
 
-## 已保存结果
+## 测试结果
 
-完整343日事后重构验证集上的选定checkpoint：
+完整有标签测试期为 2025-01-02 至 2026-06-05，共 343 个交易日。前三组为单 seed，最后一组对每日截面 percentile rank 做等权平均。
 
-| 指标 | Raw | 信号EWMA 0.25 |
-|---|---:|---:|
-| Final score | **0.328791** | **0.336329** |
-| Rank IC | 0.054986 | 0.045317 |
-| 年化超额收益 | 0.158661 | 0.152748 |
-| `1 - turnover` | 0.863996 | 0.907927 |
+| 推理口径 | Raw Final | Rank IC | 年化超额收益 | `1 - turnover` |
+|---|---:|---:|---:|---:|
+| seed 2026 | 0.335148 | 0.058924 | 0.169437 | 0.869158 |
+| seed 2027 | 0.316601 | 0.055210 | 0.145721 | 0.836004 |
+| seed 2028 | **0.335275** | **0.060288** | **0.170325** | 0.866874 |
+| 三 seed 等权 rank 集成 | 0.330705 | 0.058997 | 0.166766 | 0.856920 |
 
-checkpoint 位于`artifacts/stock_time_transformer_b0/best/model.pt`，SHA256 为
-`5076c4560ccc0b2f7d4238515423eaa145ef2e335e58a24c06553f5d0980c891`。
+单 seed Raw Final 均值为 `0.329008 ± 0.010745`。固定的因果 `EWMA(alpha=0.25)` 将三 seed 集成 Final 提高至 `0.337911`，对应 Rank IC `0.048561`、年化超额收益 `0.162433`、`1-turnover` `0.899189`。
 
-## 数据
+其中 2025 年区间曾用于 checkpoint 与架构开发。完全独立、此前锁定的 2026-01-05 至 2026-06-05 共 100 日结果如下：
 
-GitHub 不包含比赛 CSV、重构标签、memmap 面板或 SwanLab 缓存。请准备：
+| 口径 | Raw Final | Rank IC | 年化超额收益 | `1 - turnover` |
+|---|---:|---:|---:|---:|
+| 三 seed 均值 | 0.288069 ± 0.007601 | 0.037078 | 0.055887 | 0.854906 |
+| 三 seed 等权 rank 集成 | **0.288593** | **0.037613** | **0.059014** | 0.852813 |
+| 集成 + 固定 EWMA 0.25 | **0.294852** | 0.030040 | 0.043926 | **0.898861** |
+
+完整机器可读结果位于 [evaluation_results.json](artifacts/finaxial_c0/evaluation/evaluation_results.json)。由于 343 日汇总包含开发区间，它用于完整回放；100 日结果更适合衡量独立泛化能力。
+
+## 权重
+
+| Seed | Checkpoint | SHA-256 |
+|---:|---|---|
+| 2026 | `artifacts/finaxial_c0/seed_2026/model.pt` | `3b186d87c1226ab793c755205f698a0974353441320f00d3e9c4cd812989b9c1` |
+| 2027 | `artifacts/finaxial_c0/seed_2027/model.pt` | `5084c4ec4bdbd09a2d0e29f7d9c68ffc8da3ddf4234faa4ae2320b1973219e92` |
+| 2028 | `artifacts/finaxial_c0/seed_2028/model.pt` | `88b634b73fa102ebca85a1918c5d2212d0bf233f8daffcabe02da2dd2262e6b2` |
+
+推荐使用三 seed rank 集成来降低初始化方差；资源受限时可固定使用任一预先选定的 seed，不应根据目标测试区间事后选择 seed。
+
+## 数据准备
+
+请在本地准备：
 
 ```text
 data/raw/训练集.csv
@@ -53,10 +84,11 @@ evaluation/测试集_X.csv
 evaluation/测试集_Y.csv
 ```
 
-原始文件的大小和校验信息见`data/raw/README.md`。构建面板：
+构建只读面板：
 
 ```bash
-PYTHON=/mnt/workspace/zhaozetao/envs/multimodel-ppu/bin/python
+PYTHON=${FINAXIAL_PYTHON:-python}
+
 $PYTHON scripts/preprocess.py \
   --source data/raw/训练集.csv \
   --output artifacts/panel/train
@@ -68,33 +100,32 @@ $PYTHON scripts/build_phase1_panel.py \
   --output artifacts/panel/phase1
 ```
 
-## 复现训练
+缺失 OHLC 使用此前最近收盘价因果填充，成交量与成交额置零；上市前数据保持无效。标签定义为 `close(t+1) / close(t) - 1`。任何窗口归一化都只使用截至当前 token 的历史。
 
-正式结果使用8张PPU、30 epochs。启动脚本会先做单卡smoke：
+## 训练
+
+规范配置为 [configs/c0.json](configs/c0.json)。8 张 PPU 的复现入口会先运行单卡 smoke：
 
 ```bash
-bash scripts/run_stock_time_transformer_8ppu.sh
+bash scripts/run_c0_8ppu.sh
 ```
 
-核心配置为`configs/stock_time_transformer.json`，固定解释器为
-`/mnt/workspace/zhaozetao/envs/multimodel-ppu/bin/python`。不要升级或替换共享环境中的Torch套件。
+复现其他 seed 时复制配置并只修改 `seed`、SwanLab run 名及输出目录。可通过 `FINAXIAL_PYTHON` 指定解释器；在定制加速器环境中不要擅自替换厂商适配的 Torch 套件。
 
-## 历史窗口评测
+## 测评
 
-同一批217个交易日上的位置对照表明，预测能力从32日历史增长到约64日，之后基本饱和。复现：
+在完整有标签测试期复现三 seed 与集成结果：
 
 ```bash
 source /usr/local/PPU_SDK/envsetup.sh
-CUDA_VISIBLE_DEVICES=0,1 $PYTHON -m torch.distributed.run \
-  --master-port=29740 --nproc-per-node=2 \
-  scripts/evaluate_stock_time_transformer_context.py \
-  --config configs/stock_time_transformer.json \
-  --checkpoint artifacts/stock_time_transformer_b0/best/model.pt \
+CUDA_VISIBLE_DEVICES=0 $PYTHON -u scripts/evaluate_c0.py \
+  --manifest configs/c0_evaluation.json \
   --panel artifacts/panel/phase1 \
-  --output artifacts/context_window_eval
+  --output artifacts/finaxial_c0/evaluation \
+  --device cuda:0
 ```
 
-完整分析见[历史窗口报告](docs/context_window_evaluation.md)。
+为防止误覆盖，已有结果存在时脚本会拒绝重复执行；只有明确审计时才使用 `--allow-rerun`。
 
 ## 测试
 
@@ -102,9 +133,8 @@ CUDA_VISIBLE_DEVICES=0,1 $PYTHON -m torch.distributed.run \
 $PYTHON -m unittest discover -s tests -v
 ```
 
-测试覆盖因果填充、未来隔离、模型因果性、股票重排等变性、soft-final反向传播、checkpoint重载
-以及本地指标与官方`evaluate.py`逐项一致。
+测试覆盖因果填充、未来数据隔离、轴向注意力因果性、股票重排等变性、soft-score 反向传播、checkpoint 重载与指标复算。
 
-## 许可
+## License
 
-原创代码使用MIT License。比赛数据和官方题目文件不随仓库分发。
+原创代码使用 [MIT License](LICENSE)。外部数据不随仓库分发，使用者需自行确认其数据许可。

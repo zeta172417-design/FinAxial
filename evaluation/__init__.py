@@ -1,1 +1,1 @@
-"""Official competition evaluator, kept in its own namespace."""
+"""Reference evaluator kept in its own namespace."""

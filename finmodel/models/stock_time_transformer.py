@@ -201,7 +201,7 @@ class BatchedStockBlock(nn.Module):
 
 
 class StockTimeTransformer(nn.Module):
-    """B0: causal temporal encoder followed by shared stock attention."""
+    """FinAxial: interleaved causal temporal and cross-sectional attention."""
 
     def __init__(
         self,
@@ -221,12 +221,17 @@ class StockTimeTransformer(nn.Module):
         dropout: float = 0.1,
         attention_dropout: float = 0.0,
         stock_id_dropout: float = 0.1,
+        architecture: str = "stacked",
     ) -> None:
         super().__init__()
         if stocks <= 0 or lookback <= 0 or output_steps <= 1 or channels <= 0:
             raise ValueError("stocks/lookback/channels must be positive and output_steps > 1")
         if not 0 <= stock_id_dropout < 1:
             raise ValueError("stock_id_dropout must be in [0, 1)")
+        if architecture not in {"stacked", "interleaved_axial"}:
+            raise ValueError("architecture must be 'stacked' or 'interleaved_axial'")
+        if architecture == "interleaved_axial" and (temporal_layers < 2 or stock_layers < 2):
+            raise ValueError("interleaved_axial requires at least two temporal and stock layers")
         resolved_context = int(lookback) - 1 if context_days is None else int(context_days)
         resolved_window = int(lookback) if temporal_window is None else int(temporal_window)
         if resolved_context < 0 or resolved_window <= 0:
@@ -240,6 +245,7 @@ class StockTimeTransformer(nn.Module):
         self.channels = int(channels)
         self.d_model = int(d_model)
         self.stock_id_dropout = float(stock_id_dropout)
+        self.architecture = str(architecture)
         self.unknown_stock_id = self.stocks
 
         self.feature_projection = nn.Linear(channels, d_model)
@@ -289,7 +295,7 @@ class StockTimeTransformer(nn.Module):
     ) -> torch.Tensor:
         if values.ndim == 4:
             if values.shape[0] != 1:
-                raise ValueError("V2-A consumes one full-market sequence per rank")
+                raise ValueError("StockTimeTransformer consumes one full-market sequence per rank")
             values = values.squeeze(0)
             token_valid = token_valid.squeeze(0)
             eligible = eligible.squeeze(0)
@@ -310,12 +316,25 @@ class StockTimeTransformer(nn.Module):
         hidden = self.input_norm(hidden)
         temporal_mask = token_valid[..., None].to(hidden.dtype)
         hidden = hidden * temporal_mask
-        for block in self.temporal_blocks:
-            hidden = block(hidden) * temporal_mask
-
-        hidden = hidden[:, -self.output_steps:, :].permute(1, 0, 2).contiguous()
-        for block in self.stock_blocks:
-            hidden = block(hidden, eligible)
+        if self.architecture == "stacked":
+            for block in self.temporal_blocks:
+                hidden = block(hidden) * temporal_mask
+            hidden = hidden[:, -self.output_steps:, :].permute(1, 0, 2).contiguous()
+            for block in self.stock_blocks:
+                hidden = block(hidden, eligible)
+        else:
+            full_stock_blocks = min(
+                len(self.stock_blocks) - 1, len(self.temporal_blocks) - 1,
+            )
+            for index, block in enumerate(self.temporal_blocks):
+                hidden = block(hidden) * temporal_mask
+                if index < full_stock_blocks:
+                    by_date = hidden.permute(1, 0, 2).contiguous()
+                    by_date = self.stock_blocks[index](by_date, token_valid.T)
+                    hidden = by_date.permute(1, 0, 2).contiguous() * temporal_mask
+            hidden = hidden[:, -self.output_steps:, :].permute(1, 0, 2).contiguous()
+            for block in self.stock_blocks[full_stock_blocks:]:
+                hidden = block(hidden, eligible)
         prediction = self.return_head(self.output_norm(hidden)).squeeze(-1)
         mask = eligible.to(prediction.dtype)
         count = mask.sum(dim=1, keepdim=True).clamp_min(1.0)

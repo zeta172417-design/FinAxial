@@ -2,9 +2,9 @@
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PYTHON_BIN="/mnt/workspace/zhaozetao/envs/multimodel-ppu/bin/python"
+PYTHON_BIN="${FINAXIAL_PYTHON:-python}"
 PANEL_PATH="artifacts/panel/phase1"
-CONFIG_PATH="configs/stock_time_transformer.json"
+CONFIG_PATH="configs/c0.json"
 
 cd "$PROJECT_ROOT"
 source /usr/local/PPU_SDK/envsetup.sh
@@ -16,13 +16,13 @@ export FINMODEL_DDP_TIMEOUT_SECONDS=300
 
 test -f "$PANEL_PATH/manifest.json"
 
-echo "Running one-PPU B0 smoke"
+echo "Running one-PPU FinAxial C0 smoke"
 (
   export CUDA_VISIBLE_DEVICES=0
   "$PYTHON_BIN" -m torch.distributed.run --master-port=29710 --nproc-per-node=1 \
     scripts/train_stock_time_transformer.py \
     --config "$CONFIG_PATH" --panel "$PANEL_PATH" \
-    --output /tmp/stock_time_transformer_b0_smoke \
+    --output /tmp/finaxial_c0_smoke \
     --epochs 1 --limit-train-blocks 1 --limit-validation-blocks 1 \
     --disable-swanlab
 )
@@ -33,5 +33,5 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 "$PYTHON_BIN" -m torch.distributed.run --master-port=29720 --nproc-per-node=8 \
   scripts/train_stock_time_transformer.py \
   --config "$CONFIG_PATH" --panel "$PANEL_PATH" \
-  --output artifacts/stock_time_transformer_b0 \
+  --output artifacts/finaxial_c0_train_seed2026 \
   --epochs 30
