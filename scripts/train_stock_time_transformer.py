@@ -25,14 +25,21 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
 from finmodel.io import atomic_json_dump, seed_everything
+from finmodel.long_memory import LongMemoryFeatureStore
 from finmodel.metrics import add_causal_ewma, evaluate_frame, make_prediction_frame
 from finmodel.models.stock_time_transformer import StockTimeTransformer, stock_vocab_sha256
 from finmodel.panel import Panel
 from finmodel.objective import (
+    absolute_return_huber_loss,
     compose_bounded_final_score,
+    fixed_scale_excess_huber_loss,
     multi_date_soft_components,
+    multi_date_soft_rank_ic,
+    multi_date_soft_top10_excess,
     objective_settings,
+    standardized_huber_loss,
 )
+from finmodel.losses import masked_mse
 from finmodel.sequence import MultiDateCrossSectionDataset
 from finmodel.sft import (
     cosine_learning_rate,
@@ -91,6 +98,7 @@ def distributed_validation(
     world_size: int,
     route: str,
     ewma_alphas: tuple[float, ...],
+    prediction_scale: float = 1.0,
 ) -> dict[str, Any] | None:
     model.eval()
     stocks = panel.shape[1]
@@ -98,6 +106,10 @@ def distributed_validation(
     positions = list(range(rank, len(dataset), world_size))
     max_count = (len(dataset) + world_size - 1) // world_size
     prediction_pad = torch.full((max_count, steps, stocks), float("nan"), device=device)
+    return_pad = (
+        torch.full_like(prediction_pad, float("nan"))
+        if model.head_mode == "dual" else None
+    )
     eligible_pad = torch.zeros(
         (max_count, steps, stocks), dtype=torch.uint8, device=device,
     )
@@ -107,14 +119,28 @@ def distributed_validation(
         values = item["x"].to(device)
         token_valid = item["token_valid"].to(device)
         eligible = item["eligible"].to(device)
-        prediction_pad[slot] = model(values, token_valid, eligible)
+        model_output = model(
+            values, token_valid, eligible,
+            long_memory=(item["long_memory"].to(device) if "long_memory" in item else None),
+            return_heads=model.head_mode == "dual",
+        )
+        if model.head_mode == "dual":
+            prediction_pad[slot], return_pad[slot] = model_output
+        else:
+            prediction_pad[slot] = model_output
         eligible_pad[slot] = eligible.to(torch.uint8)
         date_pad[slot] = item["date_indices"].to(device)
 
     gathered_predictions = [torch.empty_like(prediction_pad) for _ in range(world_size)]
+    gathered_returns = (
+        [torch.empty_like(return_pad) for _ in range(world_size)]
+        if return_pad is not None else None
+    )
     gathered_eligible = [torch.empty_like(eligible_pad) for _ in range(world_size)]
     gathered_dates = [torch.empty_like(date_pad) for _ in range(world_size)]
     dist.all_gather(gathered_predictions, prediction_pad)
+    if return_pad is not None:
+        dist.all_gather(gathered_returns, return_pad)
     dist.all_gather(gathered_eligible, eligible_pad)
     dist.all_gather(gathered_dates, date_pad)
     if rank != 0:
@@ -124,20 +150,25 @@ def distributed_validation(
     lookup = {int(date): offset for offset, date in enumerate(requested)}
     predictions = np.full((len(requested), stocks), np.nan, dtype=np.float32)
     eligibility = np.zeros((len(requested), stocks), dtype=bool)
+    returns = np.full_like(predictions, np.nan) if gathered_returns is not None else None
     selected_output_position = np.full(len(requested), -1, dtype=np.int16)
-    for gathered, eligible, dates in zip(
+    for source_rank, (gathered, eligible, dates) in enumerate(zip(
         gathered_predictions, gathered_eligible, gathered_dates,
-    ):
+    )):
         for block in range(max_count):
             for step, date_idx in enumerate(dates[block].cpu().tolist()):
                 position = lookup.get(int(date_idx))
                 if position is None or step <= selected_output_position[position]:
                     continue
                 predictions[position] = gathered[block, step].cpu().numpy()
+                if returns is not None:
+                    returns[position] = gathered_returns[source_rank][block, step].cpu().numpy()
                 eligibility[position] = eligible[block, step].cpu().numpy().astype(bool)
                 selected_output_position[position] = step
     if not np.isfinite(predictions).all():
         raise RuntimeError("distributed validation did not cover every requested date")
+    if returns is not None and not np.isfinite(returns).all():
+        raise RuntimeError("distributed validation did not cover every return date")
 
     def score(predictions: np.ndarray, suffix: str):
         frame = make_prediction_frame(
@@ -159,11 +190,25 @@ def distributed_validation(
             smoothed[f"alpha_{alpha:g}"] = evaluate_frame(frame, "pred_smoothed")
         return raw, smoothed
 
-    raw_metrics, raw_ewma = score(predictions, "raw")
-    return {
+    raw_metrics, raw_ewma = score(
+        predictions * float(prediction_scale), "raw",
+    )
+    result = {
         "raw_metrics": raw_metrics,
         "raw_ewma_metrics": raw_ewma,
     }
+    if returns is not None:
+        valid = eligibility & np.asarray(panel.label_valid[requested], dtype=bool)
+        truth = np.asarray(panel.labels[requested], dtype=np.float32)
+        valid &= np.isfinite(truth)
+        error = returns[valid] - truth[valid]
+        result["return_metrics"] = {
+            "mae": float(np.mean(np.abs(error))) if len(error) else 0.0,
+            "mse": float(np.mean(error * error)) if len(error) else 0.0,
+            "prediction_std": float(np.std(returns[valid])) if len(error) else 0.0,
+            "target_std": float(np.std(truth[valid])) if len(error) else 0.0,
+        }
+    return result
 
 
 def main() -> None:
@@ -191,6 +236,22 @@ def main() -> None:
 
     config = load_config(args.config)
     training = config["training"]
+    objective_name = str(training.get("objective", "multi_date_final_global_excess"))
+    if objective_name not in {
+        "multi_date_final_global_excess", "rank_ic_huber", "rank_ic_only",
+        "rank_ic_excess_huber", "dual_rank_return",
+    }:
+        raise ValueError(f"unknown training objective: {objective_name}")
+    top10_excess_weight = float(training.get("top10_excess_weight", 0.0))
+    if top10_excess_weight < 0:
+        raise ValueError("top10_excess_weight must be non-negative")
+    if top10_excess_weight and objective_name not in {
+        "rank_ic_huber", "rank_ic_only", "rank_ic_excess_huber", "dual_rank_return",
+    }:
+        raise ValueError("top10_excess_weight requires a Rank-IC objective")
+    selection_metric = str(training.get("selection_metric", "exact_final_score"))
+    if selection_metric not in {"exact_final_score", "exact_rank_ic"}:
+        raise ValueError(f"unknown selection metric: {selection_metric}")
     max_epochs = int(training["max_epochs"])
     epochs = int(args.epochs or max_epochs)
     if not 1 <= epochs <= max_epochs:
@@ -202,6 +263,13 @@ def main() -> None:
     train_indices = panel_indices(panel, split.training_dates)
     validation_indices = panel_indices(panel, split.validation_dates)
     data = config["data"]
+    memory_store = (
+        LongMemoryFeatureStore.open(
+            data["long_memory_cache"], panel,
+            config["model"].get("long_memory_scales", ()),
+        ) if config["model"].get("long_memory_scales") else None
+    )
+    long_features = memory_store.features if memory_store is not None else None
     train_dataset = MultiDateCrossSectionDataset(
         panel, train_indices,
         lookback=int(config["model"]["lookback"]),
@@ -212,6 +280,7 @@ def main() -> None:
         epsilon=float(data["normalization_epsilon"]),
         clip=float(data["normalization_clip"]),
         feature_mode=str(data.get("feature_mode", "temporal")),
+        long_memory_features=long_features,
     )
     validation_dataset = MultiDateCrossSectionDataset(
         panel, validation_indices,
@@ -223,6 +292,7 @@ def main() -> None:
         epsilon=float(data["normalization_epsilon"]),
         clip=float(data["normalization_clip"]),
         feature_mode=str(data.get("feature_mode", "temporal")),
+        long_memory_features=long_features,
     )
     configured_channels = int(config["model"]["channels"])
     if train_dataset.channels != configured_channels:
@@ -246,6 +316,8 @@ def main() -> None:
         raise RuntimeError("distributed shard is empty")
 
     model = build_model(config, panel.shape[1]).to(device)
+    if (objective_name == "dual_rank_return") != (model.head_mode == "dual"):
+        raise ValueError("dual_rank_return objective and dual model head must be configured together")
     ddp_model = DDP(
         model, device_ids=[local_rank], output_device=local_rank,
         broadcast_buffers=False, find_unused_parameters=False,
@@ -302,37 +374,111 @@ def main() -> None:
                 sampler.set_epoch(epoch)
                 ddp_model.train()
                 loss_settings = objective_settings(training, epoch)
-                interval = np.zeros(10, dtype=np.float64)
+                interval = np.zeros(11, dtype=np.float64)
                 interval_count = 0
                 interval_started = time.perf_counter()
                 for step, item in enumerate(loader, start=1):
                     optimizer.zero_grad(set_to_none=True)
-                    prediction = ddp_model(
+                    target = item["target"].to(device).squeeze(0)
+                    label_mask = item["mask"].to(device).squeeze(0)
+                    model_output = ddp_model(
                         item["x"].to(device),
                         item["token_valid"].to(device),
                         item["eligible"].to(device),
+                        long_memory=(
+                            item["long_memory"].to(device)
+                            if "long_memory" in item else None
+                        ),
+                        return_heads=objective_name == "dual_rank_return",
                     )
-                    components = multi_date_soft_components(
-                        prediction,
-                        item["target"].to(device).squeeze(0),
-                        item["mask"].to(device).squeeze(0),
-                        item["tradable"].to(device).squeeze(0),
-                        rank_temperature=loss_settings.rank_temperature,
-                        top_temperature=loss_settings.top_temperature,
-                    )
-                    global_rank = global_mean_with_local_gradient(components.rank_ic)
-                    global_excess = global_mean_with_local_gradient(components.annual_excess_raw)
-                    global_stability = global_mean_with_local_gradient(components.stability)
-                    loss, soft_score, bounded_excess = compose_bounded_final_score(
-                        components,
-                        global_rank_ic=global_rank,
-                        global_annual_excess_raw=global_excess,
-                        global_stability=global_stability,
-                        excess_bound=float(training["excess_bound"]),
-                        mse_weight=float(training["mse_weight"]),
-                        component_weights=loss_settings.component_weights,
-                        range_balance_beta=loss_settings.range_balance_beta,
-                    )
+                    if objective_name == "dual_rank_return":
+                        prediction, return_prediction = model_output
+                    else:
+                        prediction = model_output
+                    tradable_mask = item["tradable"].to(device).squeeze(0)
+                    if objective_name == "rank_ic_only":
+                        global_huber = prediction.sum() * 0.0
+                    elif objective_name == "rank_ic_excess_huber":
+                        local_huber = fixed_scale_excess_huber_loss(
+                            prediction, target, label_mask, tradable_mask,
+                            return_scale=float(training["return_scale"]),
+                            target_clip=float(training.get("return_target_clip", 5.0)),
+                            delta=float(training.get("huber_delta", 0.5)),
+                        )
+                        global_huber = global_mean_with_local_gradient(local_huber)
+                    elif objective_name == "dual_rank_return":
+                        local_huber = absolute_return_huber_loss(
+                            return_prediction, target, label_mask,
+                            return_scale=float(training["return_scale"]),
+                            target_clip=float(training.get("return_target_clip", 5.0)),
+                            delta=float(training.get("huber_delta", 0.5)),
+                        )
+                        global_huber = global_mean_with_local_gradient(local_huber)
+                    else:
+                        local_huber = standardized_huber_loss(
+                            prediction, target, label_mask,
+                            delta=float(training.get("huber_delta", 0.5)),
+                        )
+                        global_huber = global_mean_with_local_gradient(local_huber)
+                    if objective_name in {
+                        "rank_ic_huber", "rank_ic_only", "rank_ic_excess_huber", "dual_rank_return",
+                    }:
+                        local_rank = multi_date_soft_rank_ic(
+                            prediction, target, label_mask,
+                            temperature=loss_settings.rank_temperature,
+                        )
+                        global_rank = global_mean_with_local_gradient(local_rank)
+                        if top10_excess_weight:
+                            local_excess = multi_date_soft_top10_excess(
+                                prediction, target, label_mask, tradable_mask,
+                                temperature=loss_settings.top_temperature,
+                            )
+                            global_excess = global_mean_with_local_gradient(local_excess)
+                            excess_bound = float(training["excess_bound"])
+                            bounded_excess = excess_bound * torch.tanh(
+                                global_excess / excess_bound
+                            )
+                        else:
+                            # Preserve the old Rank-IC route's compute cost.
+                            global_excess = prediction.sum() * 0.0
+                            bounded_excess = global_excess
+                        global_stability = prediction.sum() * 0.0
+                        mse_diagnostic = masked_mse(
+                            return_prediction if objective_name == "dual_rank_return" else prediction,
+                            target, label_mask,
+                        )
+                        loss = -global_rank
+                        loss = loss - top10_excess_weight * bounded_excess
+                        if objective_name in {"rank_ic_huber", "rank_ic_excess_huber", "dual_rank_return"}:
+                            loss = loss + float(
+                                training.get("huber_weight", 0.1)
+                            ) * global_huber
+                        soft_score = global_rank + top10_excess_weight * bounded_excess
+                    else:
+                        components = multi_date_soft_components(
+                            prediction, target, label_mask,
+                            tradable_mask,
+                            rank_temperature=loss_settings.rank_temperature,
+                            top_temperature=loss_settings.top_temperature,
+                        )
+                        global_rank = global_mean_with_local_gradient(components.rank_ic)
+                        global_excess = global_mean_with_local_gradient(
+                            components.annual_excess_raw
+                        )
+                        global_stability = global_mean_with_local_gradient(
+                            components.stability
+                        )
+                        loss, soft_score, bounded_excess = compose_bounded_final_score(
+                            components,
+                            global_rank_ic=global_rank,
+                            global_annual_excess_raw=global_excess,
+                            global_stability=global_stability,
+                            excess_bound=float(training["excess_bound"]),
+                            mse_weight=float(training["mse_weight"]),
+                            component_weights=loss_settings.component_weights,
+                            range_balance_beta=loss_settings.range_balance_beta,
+                        )
+                        mse_diagnostic = components.mse
                     official_soft_score = (
                         0.4 * global_rank
                         + 0.3 * bounded_excess
@@ -382,8 +528,8 @@ def main() -> None:
                         float(loss.detach()), float(soft_score.detach()),
                         float(official_soft_score.detach()), float(global_rank.detach()),
                         float(global_excess.detach()), float(bounded_excess.detach()),
-                        float(global_stability.detach()), float(components.mse.detach()),
-                        float(grad_norm), learning_rate,
+                        float(global_stability.detach()), float(mse_diagnostic.detach()),
+                        float(global_huber.detach()), float(grad_norm), learning_rate,
                     ])
                     interval += values
                     interval_count += 1
@@ -399,18 +545,24 @@ def main() -> None:
                             tracker.log({
                                 "train/loss": means[0],
                                 "train/objective_score": means[1],
-                                "train/soft_final_official": means[2],
+                                (
+                                    "train/soft_final_official"
+                                    if objective_name == "multi_date_final_global_excess"
+                                    else "train/soft_rank_excess_no_turnover"
+                                ): means[2],
                                 "train/soft_rank_ic": means[3],
                                 "train/soft_annual_excess_raw": means[4],
                                 "train/soft_annual_excess_bounded": means[5],
                                 "train/soft_one_minus_turnover": means[6],
                                 "train/mse_diagnostic": means[7],
-                                "train/grad_norm": means[8],
-                                "train/lr": means[9],
+                                "train/auxiliary_huber": means[8],
+                                "train/grad_norm": means[9],
+                                "train/lr": means[10],
                                 "train/rank_temperature": loss_settings.rank_temperature,
                                 "train/top_temperature": loss_settings.top_temperature,
                                 "train/rank_weight": loss_settings.component_weights[0],
                                 "train/excess_weight": loss_settings.component_weights[1],
+                                "train/top10_excess_weight": top10_excess_weight,
                                 "train/stability_weight": loss_settings.component_weights[2],
                                 "train/range_balance_beta": loss_settings.range_balance_beta,
                                 "train/epoch": epoch,
@@ -437,6 +589,10 @@ def main() -> None:
                     model, validation_dataset, panel, device,
                     rank=rank, world_size=world_size, route=route,
                     ewma_alphas=ewma_alphas,
+                    prediction_scale=(
+                        float(training["return_scale"])
+                        if objective_name == "rank_ic_excess_huber" else 1.0
+                    ),
                 )
                 if rank == 0:
                     assert validation is not None
@@ -450,14 +606,17 @@ def main() -> None:
                         "optimizer_update": global_update,
                         "raw": raw_summary,
                         "raw_ewma": raw_ewma,
+                        **({"return_metrics": validation["return_metrics"]}
+                           if "return_metrics" in validation else {}),
                     }
                     history.append(row)
                     window = history[-smoothing_epochs:]
-                    stable = float(np.mean([
-                        x["raw"]["final_score"] for x in window
-                    ]))
+                    selection_key = (
+                        "final_score" if selection_metric == "exact_final_score" else "rank_ic"
+                    )
+                    stable = float(np.mean([x["raw"][selection_key] for x in window]))
                     stable_std = float(np.std([
-                        x["raw"]["final_score"] for x in window
+                        x["raw"][selection_key] for x in window
                     ]))
                     row.update({
                         "stable_selection_mean": stable,
@@ -471,9 +630,12 @@ def main() -> None:
                             ewma_logs[f"validation/raw/ewma/{alpha}/{key}"] = value
                     validation_logs = {
                         **{f"validation/raw/{key}": value for key, value in raw_summary.items()},
+                        **({f"validation/return/{key}": value
+                            for key, value in validation["return_metrics"].items()}
+                           if "return_metrics" in validation else {}),
                         **ewma_logs,
-                        "validation/stability/final_score_ma3": stable,
-                        "validation/stability/final_score_window_std": stable_std,
+                        f"validation/stability/{selection_key}_ma{smoothing_epochs}": stable,
+                        f"validation/stability/{selection_key}_window_std": stable_std,
                         "validation/epoch": epoch,
                         "validation/optimizer_update": global_update,
                     }
@@ -486,7 +648,10 @@ def main() -> None:
                             model, output / "best_raw",
                             {"epoch": epoch, "optimizer_update": global_update,
                              "validation_final_score": raw_score,
-                             "score_components": raw_summary},
+                             "training_objective": objective_name,
+                             "return_scale": training.get("return_scale"),
+                             "score_components": raw_summary,
+                             "return_metrics": validation.get("return_metrics")},
                             architecture=config["model"], vocabulary_hash=vocabulary_hash,
                         )
                     eligible_selection = len(window) == smoothing_epochs or epoch == epochs
@@ -497,10 +662,15 @@ def main() -> None:
                             model, output / "best",
                             {"epoch": epoch, "optimizer_update": global_update,
                              "validation_final_score": raw_score,
-                             "stable_validation_final_score": stable,
-                             "stable_validation_final_score_std": stable_std,
+                             "validation_rank_ic": float(raw_summary["rank_ic"]),
+                             "selection_metric": selection_metric,
+                             "training_objective": objective_name,
+                             "return_scale": training.get("return_scale"),
+                             "stable_validation_selection_value": stable,
+                             "stable_validation_selection_std": stable_std,
                              "parameter_source": "raw",
-                             "score_components": raw_summary},
+                             "score_components": raw_summary,
+                             "return_metrics": validation.get("return_metrics")},
                             architecture=config["model"], vocabulary_hash=vocabulary_hash,
                         )
                 dist.barrier()
@@ -524,21 +694,31 @@ def main() -> None:
                     "output_steps": int(config["model"]["output_steps"]),
                     "sequence_length": model.sequence_length,
                     "dates_per_global_update": world_size * int(config["model"]["output_steps"]),
-                    "training_objective": "multi_date_final_global_excess",
+                    "training_objective": objective_name,
+                    "top10_excess_weight": top10_excess_weight,
+                    "head_mode": model.head_mode,
+                    "long_memory_scales": list(model.long_memory_scales),
+                    "long_memory_cache": data.get("long_memory_cache"),
+                    "return_scale": training.get("return_scale"),
+                    "initialization": str(
+                        training.get("initialization", "random_from_scratch")
+                    ),
                     "loss_variant": str(training.get("loss_variant", "official")),
                     "feature_mode": str(data.get("feature_mode", "temporal")),
                     "architecture": str(config["model"].get("architecture", "stacked")),
                     "checkpoint_selection": (
                         f"highest_{smoothing_epochs}_epoch_trailing_mean_"
-                        "raw_final_score"
+                        f"{selection_metric}"
                     ),
                     "checkpoint_parameter_source": "raw",
                     "parameter_ema_enabled": False,
                     "best_epoch": best_epoch,
                     "best_optimizer_update": best_update,
                     "best_validation_final_score": best_endpoint,
-                    "best_stable_validation_final_score": best_stable,
+                    "best_validation_rank_ic": selected["raw"]["rank_ic"],
+                    "best_stable_validation_selection_value": best_stable,
                     "best_checkpoint_score_components": selected["raw"],
+                    "best_checkpoint_return_metrics": selected.get("return_metrics"),
                     "best_checkpoint_ewma_components": selected["raw_ewma"],
                     "best_raw_validation_final_score": best_raw,
                     "best_raw_epoch": best_raw_epoch,

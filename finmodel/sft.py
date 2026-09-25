@@ -21,8 +21,27 @@ class SFTSplit:
 
 
 def load_config(path: str | Path) -> dict[str, Any]:
-    with Path(path).open(encoding="utf-8") as handle:
-        return json.load(handle)
+    def merge(target: dict[str, Any], update: dict[str, Any]) -> None:
+        for key, value in update.items():
+            if isinstance(value, dict) and isinstance(target.get(key), dict):
+                merge(target[key], value)
+            else:
+                target[key] = value
+
+    def resolve(config_path: Path, seen: set[Path]) -> dict[str, Any]:
+        canonical = config_path.resolve()
+        if canonical in seen:
+            raise ValueError(f"configuration inheritance cycle: {canonical}")
+        with config_path.open(encoding="utf-8") as handle:
+            current = json.load(handle)
+        base_name = current.pop("_base", None)
+        if base_name is None:
+            return current
+        inherited = resolve(config_path.parent / str(base_name), seen | {canonical})
+        merge(inherited, current)
+        return inherited
+
+    return resolve(Path(path), set())
 
 
 def sft_split(panel, config: dict[str, Any]) -> SFTSplit:

@@ -1,0 +1,52 @@
+{
+  "complete": true,
+  "summary": {
+    "algorithm": "ppo_gae_group",
+    "backbone_initial_sha256": "e8c89bb5939ab398cbef05f75a6b8dff7221d7909f00085eda25dbc73f138c9c",
+    "backbone_parameters": 964448,
+    "backbone_trainable": false,
+    "best_epoch": 5,
+    "best_score_components": {
+      "annual_excess": 0.1049495506805976,
+      "annual_excess_x_0.3": 0.03148486520417928,
+      "coverage": 0.9988915013009813,
+      "final_score": 0.34685889748594356,
+      "ic_positive_ratio": 0.7551020408163265,
+      "icir": 0.6610874830325069,
+      "mae": 0.5092329859418296,
+      "mse": 0.3077635109018644,
+      "one_minus_turnover": 0.9591321594901084,
+      "rank_ic": 0.06908596108682939,
+      "rank_ic_x_0.4": 0.02763438443473176,
+      "stability_x_0.3": 0.28773964784703254
+    },
+    "best_stable_final_score": 0.3471100838218696,
+    "critic_parameters": 8973,
+    "elapsed_seconds": 2764.0474474485964,
+    "epochs_trained": 6,
+    "fixed_base_rank": false,
+    "initial_policy_checkpoint": null,
+    "nonzero_c0_grad_updates": 0,
+    "optimizer_updates": 612,
+    "peak_memory_bytes_max_rank": 3775224320,
+    "policy_parameters": 7798,
+    "protocol": "stage2_old_dual_joint_ppo_group_gae_frozen_c0_g16_4ppu_v1",
+    "reference_hysteresis": {
+      "annual_excess": 0.10616617157092503,
+      "annual_excess_x_0.3": 0.03184985147127751,
+      "coverage": 0.9988915013009813,
+      "final_score": 0.3424378412467396,
+      "ic_positive_ratio": 0.7463556851311953,
+      "icir": 0.6211645388250355,
+      "mae": 0.5061178465791059,
+      "mse": 0.29966941111816836,
+      "one_minus_turnover": 0.9465631996212104,
+      "rank_ic": 0.06654757472274749,
+      "rank_ic_x_0.4": 0.026619029889098995,
+      "stability_x_0.3": 0.2839689598863631
+    },
+    "stopped_early": false,
+    "train_blocks": 51,
+    "validation_days": 343
+  }
+}

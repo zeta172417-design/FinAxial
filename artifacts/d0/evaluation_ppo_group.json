@@ -1,0 +1,49 @@
+{
+  "checkpoint": "artifacts/d0/decision_ppo_group/best/policy.pt",
+  "diagnostics": {
+    "action_value_mean": [
+      0.342733770608902,
+      0.0019982855301350355,
+      7.014577388763428
+    ],
+    "action_value_std": [
+      0.0048197428695857525,
+      3.973009299329533e-08,
+      0.14231909811496735
+    ],
+    "alpha_mean": 0.342733770608902,
+    "alpha_std": 0.0048197428695857525,
+    "candidate_bonus_abs_mean": 0.0,
+    "candidate_count_mean": 0.0,
+    "delta_mean": 0.0,
+    "delta_std": 0.0,
+    "hysteresis_margin_mean": 0.0019982855301350355,
+    "hysteresis_margin_std": 3.967213757505306e-08,
+    "policy_std": [
+      0.19973240792751312,
+      0.20009379088878632,
+      0.19955457746982574
+    ],
+    "realized_swaps_mean": 9.504373550415039,
+    "realized_swaps_std": 2.576174736022949,
+    "reference_kl": 1.6044949293136597,
+    "swap_budget_mean": 7.014577388763428,
+    "swap_budget_std": 0.14231909811496735
+  },
+  "metrics": {
+    "annual_excess": 0.1049495506805976,
+    "annual_excess_x_0.3": 0.03148486520417928,
+    "coverage": 0.9988915013009813,
+    "final_score": 0.34685889748594356,
+    "ic_positive_ratio": 0.7551020408163265,
+    "icir": 0.6610874830325069,
+    "mae": 0.5092329859418296,
+    "mse": 0.3077635109018644,
+    "one_minus_turnover": 0.9591321594901084,
+    "rank_ic": 0.06908596108682939,
+    "rank_ic_x_0.4": 0.02763438443473176,
+    "stability_x_0.3": 0.28773964784703254
+  },
+  "route": "ppo_group",
+  "validation_days": 343
+}

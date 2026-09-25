@@ -200,6 +200,39 @@ class BatchedStockBlock(nn.Module):
         return values * mask
 
 
+class CausalMultiScaleMemory(nn.Module):
+    """Attend to a few already-causal trend summaries at each date/stock."""
+
+    def __init__(self, d_model: int, scales: int, channels: int) -> None:
+        super().__init__()
+        self.scales = int(scales)
+        self.channels = int(channels)
+        self.feature_projection = nn.Linear(channels, d_model)
+        self.scale_embedding = nn.Parameter(torch.zeros(scales, d_model))
+        self.query = nn.Linear(d_model, d_model)
+        self.key = nn.Linear(d_model, d_model)
+        self.value = nn.Linear(d_model, d_model)
+        self.output = nn.Linear(d_model, d_model)
+        self.gate = nn.Linear(2 * d_model, d_model)
+        self.norm = nn.LayerNorm(d_model)
+        nn.init.normal_(self.scale_embedding, std=0.02)
+        nn.init.zeros_(self.output.weight)
+        nn.init.zeros_(self.output.bias)
+        nn.init.constant_(self.gate.bias, -2.0)
+
+    def forward(self, recent: torch.Tensor, memory: torch.Tensor) -> torch.Tensor:
+        if memory.shape != (*recent.shape[:2], self.scales, self.channels):
+            raise ValueError("long memory shape does not match recent tokens")
+        tokens = self.feature_projection(memory) + self.scale_embedding
+        query = self.query(recent).unsqueeze(-2)
+        keys = self.key(tokens)
+        values = self.value(tokens)
+        logits = (query * keys).sum(dim=-1) / (recent.shape[-1] ** 0.5)
+        context = (torch.softmax(logits, dim=-1)[..., None] * values).sum(dim=-2)
+        update = torch.sigmoid(self.gate(torch.cat((recent, context), dim=-1)))
+        return recent + update * self.output(self.norm(context))
+
+
 class StockTimeTransformer(nn.Module):
     """FinAxial: interleaved causal temporal and cross-sectional attention."""
 
@@ -222,6 +255,10 @@ class StockTimeTransformer(nn.Module):
         attention_dropout: float = 0.0,
         stock_id_dropout: float = 0.1,
         architecture: str = "stacked",
+        head_mode: str = "single",
+        return_scale: float = 0.02,
+        long_memory_scales: Sequence[int] = (),
+        long_memory_channels: int = 6,
     ) -> None:
         super().__init__()
         if stocks <= 0 or lookback <= 0 or output_steps <= 1 or channels <= 0:
@@ -230,6 +267,12 @@ class StockTimeTransformer(nn.Module):
             raise ValueError("stock_id_dropout must be in [0, 1)")
         if architecture not in {"stacked", "interleaved_axial"}:
             raise ValueError("architecture must be 'stacked' or 'interleaved_axial'")
+        if head_mode not in {"single", "dual"} or return_scale <= 0:
+            raise ValueError("head mode must be single or dual, with positive return scale")
+        if long_memory_scales and architecture != "interleaved_axial":
+            raise ValueError("long memory currently needs interleaved axial architecture")
+        if any(int(scale) < 2 for scale in long_memory_scales) or long_memory_channels <= 0:
+            raise ValueError("long memory scales/channels are invalid")
         if architecture == "interleaved_axial" and (temporal_layers < 2 or stock_layers < 2):
             raise ValueError("interleaved_axial requires at least two temporal and stock layers")
         resolved_context = int(lookback) - 1 if context_days is None else int(context_days)
@@ -246,6 +289,10 @@ class StockTimeTransformer(nn.Module):
         self.d_model = int(d_model)
         self.stock_id_dropout = float(stock_id_dropout)
         self.architecture = str(architecture)
+        self.head_mode = str(head_mode)
+        self.return_scale = float(return_scale)
+        self.long_memory_scales = tuple(int(scale) for scale in long_memory_scales)
+        self.long_memory_channels = int(long_memory_channels)
         self.unknown_stock_id = self.stocks
 
         self.feature_projection = nn.Linear(channels, d_model)
@@ -270,6 +317,13 @@ class StockTimeTransformer(nn.Module):
         ])
         self.output_norm = nn.LayerNorm(d_model)
         self.return_head = nn.Linear(d_model, 1, bias=False)
+        if self.head_mode == "dual":
+            self.absolute_return_norm = nn.LayerNorm(d_model)
+            self.absolute_return_head = nn.Linear(d_model, 1, bias=False)
+        if self.long_memory_scales:
+            self.long_memory = CausalMultiScaleMemory(
+                d_model, len(self.long_memory_scales), self.long_memory_channels,
+            )
         self.register_buffer(
             "_default_stock_ids", torch.arange(stocks, dtype=torch.long), persistent=False,
         )
@@ -286,12 +340,13 @@ class StockTimeTransformer(nn.Module):
             ids = torch.where(drop, self.unknown_stock_id, ids)
         return ids
 
-    def forward(
+    def encode_hidden(
         self,
         values: torch.Tensor,
         token_valid: torch.Tensor,
         eligible: torch.Tensor,
         stock_ids: torch.Tensor | None = None,
+        long_memory: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if values.ndim == 4:
             if values.shape[0] != 1:
@@ -299,6 +354,8 @@ class StockTimeTransformer(nn.Module):
             values = values.squeeze(0)
             token_valid = token_valid.squeeze(0)
             eligible = eligible.squeeze(0)
+            if long_memory is not None:
+                long_memory = long_memory.squeeze(0)
         expected = (self.stocks, self.sequence_length, self.channels)
         if tuple(values.shape) != expected:
             raise ValueError(f"expected input {expected}, got {tuple(values.shape)}")
@@ -308,6 +365,16 @@ class StockTimeTransformer(nn.Module):
             raise ValueError("token_valid has the wrong shape")
         if tuple(eligible.shape) != (self.output_steps, self.stocks):
             raise ValueError("eligible has the wrong shape")
+        if self.long_memory_scales:
+            expected_long = (
+                self.stocks, self.sequence_length,
+                len(self.long_memory_scales), self.long_memory_channels,
+            )
+            if long_memory is None or tuple(long_memory.shape) != expected_long:
+                raise ValueError(f"expected long memory shape {expected_long}")
+            long_memory = long_memory.to(device=values.device, dtype=values.dtype)
+        elif long_memory is not None:
+            raise ValueError("long memory was supplied to a model without a memory branch")
 
         hidden = self.feature_projection(values)
         ids = self._stock_ids(stock_ids, values.device)
@@ -328,6 +395,8 @@ class StockTimeTransformer(nn.Module):
             )
             for index, block in enumerate(self.temporal_blocks):
                 hidden = block(hidden) * temporal_mask
+                if index == 0 and self.long_memory_scales:
+                    hidden = self.long_memory(hidden, long_memory) * temporal_mask
                 if index < full_stock_blocks:
                     by_date = hidden.permute(1, 0, 2).contiguous()
                     by_date = self.stock_blocks[index](by_date, token_valid.T)
@@ -335,9 +404,58 @@ class StockTimeTransformer(nn.Module):
             hidden = hidden[:, -self.output_steps:, :].permute(1, 0, 2).contiguous()
             for block in self.stock_blocks[full_stock_blocks:]:
                 hidden = block(hidden, eligible)
+        return hidden
+
+    def score_hidden(
+        self, hidden: torch.Tensor, eligible: torch.Tensor,
+    ) -> torch.Tensor:
+        """Project encoded supervised-date states to centered stock scores."""
+        if tuple(hidden.shape) != (self.output_steps, self.stocks, self.d_model):
+            raise ValueError(
+                "expected hidden shape "
+                f"{(self.output_steps, self.stocks, self.d_model)}, got {tuple(hidden.shape)}"
+            )
+        eligible = eligible.to(hidden.device, dtype=torch.bool)
+        if tuple(eligible.shape) != (self.output_steps, self.stocks):
+            raise ValueError("eligible has the wrong shape")
         prediction = self.return_head(self.output_norm(hidden)).squeeze(-1)
         mask = eligible.to(prediction.dtype)
         count = mask.sum(dim=1, keepdim=True).clamp_min(1.0)
         mean = (prediction * mask).sum(dim=1, keepdim=True) / count
         prediction = prediction - mean
         return torch.where(eligible, prediction, torch.zeros_like(prediction))
+
+    def predict_return_hidden(
+        self, hidden: torch.Tensor, eligible: torch.Tensor,
+    ) -> torch.Tensor:
+        """Absolute next-day return in decimal units, not a ranking proxy."""
+        if self.head_mode != "dual":
+            raise ValueError("absolute return head is available only in dual mode")
+        if tuple(hidden.shape) != (self.output_steps, self.stocks, self.d_model):
+            raise ValueError("hidden shape does not match the return head")
+        prediction = self.absolute_return_head(
+            self.absolute_return_norm(hidden)
+        ).squeeze(-1) * self.return_scale
+        return torch.where(
+            eligible.to(hidden.device, dtype=torch.bool), prediction,
+            torch.zeros_like(prediction),
+        )
+
+    def forward(
+        self,
+        values: torch.Tensor,
+        token_valid: torch.Tensor,
+        eligible: torch.Tensor,
+        stock_ids: torch.Tensor | None = None,
+        long_memory: torch.Tensor | None = None,
+        return_heads: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        hidden = self.encode_hidden(
+            values, token_valid, eligible, stock_ids, long_memory,
+        )
+        if eligible.ndim == 3:
+            eligible = eligible.squeeze(0)
+        score = self.score_hidden(hidden, eligible)
+        if return_heads:
+            return score, self.predict_return_hidden(hidden, eligible)
+        return score

@@ -23,23 +23,12 @@ evaluation/*.csv
 /models/
 *.safetensors
 
-# Generated experiment artifacts
+# Publish only the compact D0 checkpoints and reports. Market panels, caches,
+# experiment logs, and the recoverable legacy archive remain local.
 artifacts/*
-!artifacts/finaxial_c0/
-artifacts/finaxial_c0/*
-!artifacts/finaxial_c0/README.md
-!artifacts/finaxial_c0/seed_2026/
-!artifacts/finaxial_c0/seed_2027/
-!artifacts/finaxial_c0/seed_2028/
-artifacts/finaxial_c0/seed_*/*
-!artifacts/finaxial_c0/seed_*/model.pt
-!artifacts/finaxial_c0/seed_*/metadata.json
-!artifacts/finaxial_c0/seed_*/train_summary.json
-!artifacts/finaxial_c0/seed_*/validation_history.json
-!artifacts/finaxial_c0/evaluation/
-artifacts/finaxial_c0/evaluation/*
-!artifacts/finaxial_c0/evaluation/evaluation_results.json
-!artifacts/finaxial_c0/evaluation/evaluation_summary.csv
+!artifacts/d0/
+artifacts/d0/cache
+artifacts/d0/decision_ppo_group/best/model.pt
 
 # Local tracking and logs
 swanlog*/

@@ -8,8 +8,11 @@ import torch
 from finmodel.models.stock_time_transformer import StockTimeTransformer
 from finmodel.objective import (
     compose_bounded_final_score,
+    fixed_scale_excess_huber_loss,
     multi_date_soft_components,
+    multi_date_soft_rank_ic,
     objective_settings,
+    standardized_huber_loss,
 )
 from finmodel.sequence import (
     causal_return_features,
@@ -143,6 +146,46 @@ class StockTimeTransformerTests(unittest.TestCase):
         self.assertTrue(bool(torch.isfinite(torch.stack([loss, score, excess])).all()))
         loss.backward()
         self.assertTrue(torch.isfinite(prediction.grad).all())
+
+    def test_standardized_huber_is_scale_invariant_and_finite(self):
+        prediction = torch.randn(3, 8, requires_grad=True)
+        target = torch.randn(3, 8) * 0.02
+        mask = torch.ones(3, 8, dtype=torch.bool)
+        expected = standardized_huber_loss(prediction, target, mask)
+        actual = standardized_huber_loss(7.0 * prediction + 3.0, target, mask)
+        torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
+        expected.backward()
+        self.assertTrue(bool(torch.isfinite(prediction.grad).all()))
+
+    def test_rank_only_objective_is_finite_and_backpropagates(self):
+        prediction = torch.randn(3, 8, requires_grad=True)
+        target = torch.randn(3, 8) * 0.02
+        mask = torch.ones(3, 8, dtype=torch.bool)
+        rank_ic = multi_date_soft_rank_ic(prediction, target, mask)
+        self.assertTrue(bool(torch.isfinite(rank_ic)))
+        (-rank_ic).backward()
+        self.assertTrue(bool(torch.isfinite(prediction.grad).all()))
+
+    def test_fixed_scale_excess_huber_preserves_return_magnitude(self):
+        target = torch.tensor([
+            [0.01, 0.03, -0.01, 0.05],
+            [0.02, 0.00, 0.04, -0.02],
+        ])
+        mask = torch.ones_like(target, dtype=torch.bool)
+        market_mean = target.mean(dim=1, keepdim=True)
+        prediction = ((target - market_mean) / 0.02).requires_grad_()
+        loss = fixed_scale_excess_huber_loss(
+            prediction, target, mask, mask, return_scale=0.02,
+        )
+        self.assertAlmostEqual(float(loss.detach()), 0.0, places=7)
+        loss.backward()
+        self.assertTrue(bool(torch.isfinite(prediction.grad).all()))
+
+        shifted = target + torch.tensor([[0.1], [-0.2]])
+        shifted_loss = fixed_scale_excess_huber_loss(
+            prediction.detach(), shifted, mask, mask, return_scale=0.02,
+        )
+        self.assertAlmostEqual(float(shifted_loss), 0.0, places=6)
 
     def test_feature_modes_are_causal_and_cross_sectional(self):
         rng = np.random.default_rng(19)

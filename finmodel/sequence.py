@@ -134,6 +134,7 @@ class MultiDateCrossSectionDataset(Dataset):
         epsilon: float = 1e-5,
         clip: float = 5.0,
         feature_mode: str = "temporal",
+        long_memory_features: np.ndarray | None = None,
     ) -> None:
         self.panel = panel
         self.lookback = int(lookback)
@@ -144,6 +145,12 @@ class MultiDateCrossSectionDataset(Dataset):
         self.epsilon = float(epsilon)
         self.clip = float(clip)
         self.feature_mode = str(feature_mode)
+        self.long_memory_features = long_memory_features
+        if long_memory_features is not None and (
+            long_memory_features.ndim != 4
+            or long_memory_features.shape[:2] != panel.features.shape[:2]
+        ):
+            raise ValueError("long memory must be [panel dates, stocks, scales, channels]")
         if self.feature_mode not in FEATURE_MODES:
             raise ValueError(
                 f"feature_mode must be one of {FEATURE_MODES}, got {self.feature_mode!r}"
@@ -244,7 +251,7 @@ class MultiDateCrossSectionDataset(Dataset):
         targets = np.asarray(self.panel.labels[output_dates], dtype=np.float32).copy()
         label_valid = np.asarray(self.panel.label_valid[output_dates], dtype=bool)
         limit_up = np.asarray(self.panel.limit_flags[output_dates, :, 0], dtype=bool)
-        return {
+        item = {
             "x": torch.from_numpy(values),
             "token_valid": torch.from_numpy(token_valid),
             "target": torch.from_numpy(targets),
@@ -253,3 +260,10 @@ class MultiDateCrossSectionDataset(Dataset):
             "tradable": torch.from_numpy(eligible & ~limit_up),
             "date_indices": torch.from_numpy(output_dates.copy()),
         }
+        if self.long_memory_features is not None:
+            long_values = np.asarray(
+                self.long_memory_features[sequence_start:sequence_end + 1],
+                dtype=np.float32,
+            ).transpose(1, 0, 2, 3).copy()
+            item["long_memory"] = torch.from_numpy(long_values)
+        return item

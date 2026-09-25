@@ -4,8 +4,15 @@ import math
 from typing import NamedTuple
 
 import torch
+import torch.nn.functional as F
 
-from .losses import _soft_day_components, masked_mse
+from .losses import (
+    _correlation,
+    _hard_percentile_rank,
+    _soft_day_components,
+    _soft_percentile_rank,
+    masked_mse,
+)
 
 
 class SequenceSoftScore(NamedTuple):
@@ -20,6 +27,182 @@ class ObjectiveSettings(NamedTuple):
     top_temperature: float
     component_weights: tuple[float, float, float]
     range_balance_beta: float
+
+
+def standardized_huber_loss(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor,
+    *,
+    delta: float = 0.5,
+    epsilon: float = 1e-5,
+) -> torch.Tensor:
+    """Daily cross-sectional Huber after causal-label-free standardization.
+
+    Standardizing prediction and target independently makes this auxiliary
+    calibration term insensitive to the arbitrary daily score scale while
+    retaining substantially denser gradients than a rank-only objective.
+    """
+    if prediction.ndim != 2 or target.shape != prediction.shape:
+        raise ValueError("prediction and target must both be [dates, stocks]")
+    if mask.shape != prediction.shape:
+        raise ValueError("mask must match prediction")
+    if delta <= 0 or epsilon <= 0:
+        raise ValueError("delta and epsilon must be positive")
+    losses = []
+    for date in range(prediction.shape[0]):
+        valid = mask[date].bool() & torch.isfinite(target[date])
+        if int(valid.sum()) < 2:
+            continue
+        pred = prediction[date, valid]
+        truth = target[date, valid]
+        pred = (pred - pred.mean()) / (pred.std(unbiased=False) + float(epsilon))
+        truth = (truth - truth.mean()) / (truth.std(unbiased=False) + float(epsilon))
+        losses.append(F.huber_loss(pred, truth, delta=float(delta)))
+    if not losses:
+        return prediction.sum() * 0.0
+    return torch.stack(losses).mean()
+
+
+def fixed_scale_excess_huber_loss(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    label_mask: torch.Tensor,
+    tradable_mask: torch.Tensor,
+    *,
+    return_scale: float = 0.02,
+    target_clip: float = 5.0,
+    delta: float = 0.5,
+) -> torch.Tensor:
+    """Predict next-day excess return in fixed, cross-date-comparable units.
+
+    The daily tradable-universe mean is removed because the downstream return
+    metric is excess over that same market.  Dividing by one fixed scale keeps
+    magnitude information that would be erased by daily z-scoring.
+    """
+    if prediction.ndim != 2 or target.shape != prediction.shape:
+        raise ValueError("prediction and target must both be [dates, stocks]")
+    if label_mask.shape != prediction.shape or tradable_mask.shape != prediction.shape:
+        raise ValueError("masks must match prediction")
+    if return_scale <= 0 or target_clip <= 0 or delta <= 0:
+        raise ValueError("return_scale, target_clip and delta must be positive")
+    losses = []
+    for date in range(prediction.shape[0]):
+        labelled = label_mask[date].bool() & torch.isfinite(target[date])
+        market = labelled & tradable_mask[date].bool()
+        if int(labelled.sum()) < 2 or not bool(market.any()):
+            continue
+        market_return = target[date, market].mean().detach()
+        scaled_excess = (
+            (target[date, labelled] - market_return) / float(return_scale)
+        ).clamp(-float(target_clip), float(target_clip))
+        losses.append(F.huber_loss(
+            prediction[date, labelled], scaled_excess, delta=float(delta),
+        ))
+    if not losses:
+        return prediction.sum() * 0.0
+    return torch.stack(losses).mean()
+
+
+def absolute_return_huber_loss(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor,
+    *,
+    return_scale: float = 0.02,
+    target_clip: float = 5.0,
+    delta: float = 0.5,
+) -> torch.Tensor:
+    """Calibrate an independent head to absolute next-day returns."""
+    if prediction.ndim != 2 or target.shape != prediction.shape or mask.shape != prediction.shape:
+        raise ValueError("prediction, target and mask must be [dates, stocks]")
+    if return_scale <= 0 or target_clip <= 0 or delta <= 0:
+        raise ValueError("return scale, target clip and Huber delta must be positive")
+    valid = mask.bool() & torch.isfinite(target)
+    if not bool(valid.any()):
+        return prediction.sum() * 0.0
+    scaled_target = (target[valid] / float(return_scale)).clamp(
+        -float(target_clip), float(target_clip),
+    )
+    return F.huber_loss(
+        prediction[valid] / float(return_scale), scaled_target,
+        delta=float(delta),
+    )
+
+
+def multi_date_soft_rank_ic(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor,
+    *,
+    temperature: float = 0.1,
+) -> torch.Tensor:
+    """Mean differentiable daily Rank IC without building Top-10 portfolios."""
+    if prediction.ndim != 2 or target.shape != prediction.shape:
+        raise ValueError("prediction and target must both be [dates, stocks]")
+    if mask.shape != prediction.shape or temperature <= 0:
+        raise ValueError("mask must match prediction and temperature must be positive")
+    values = []
+    for date in range(prediction.shape[0]):
+        valid = mask[date].bool() & torch.isfinite(target[date])
+        ranks, indices = _soft_percentile_rank(
+            prediction[date], valid, float(temperature),
+        )
+        if indices.numel() < 2:
+            values.append(prediction[date].sum() * 0.0)
+            continue
+        truth_rank = _hard_percentile_rank(target[date, indices]).detach()
+        values.append(_correlation(ranks[indices], truth_rank))
+    return torch.stack(values).mean()
+
+
+def multi_date_soft_top10_excess(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    label_mask: torch.Tensor,
+    tradable_mask: torch.Tensor,
+    *,
+    temperature: float = 0.02,
+    min_universe: int = 100,
+) -> torch.Tensor:
+    """Differentiable annualized Top-10% excess return, without turnover.
+
+    The detached cutoff is halfway between the last selected and first
+    unselected tradable score. This makes the forward limit match exact Top-10%
+    selection while the sigmoid supplies gradients around the selection edge.
+    Scores are standardized per day so the temperature is scale-independent.
+    """
+    if prediction.ndim != 2 or target.shape != prediction.shape:
+        raise ValueError("prediction and target must both be [dates, stocks]")
+    if label_mask.shape != prediction.shape or tradable_mask.shape != prediction.shape:
+        raise ValueError("masks must match prediction")
+    if temperature <= 0:
+        raise ValueError("temperature must be positive")
+    if min_universe < 2:
+        raise ValueError("min_universe must be at least 2")
+    values = []
+    for date in range(prediction.shape[0]):
+        valid = (
+            label_mask[date].bool() & tradable_mask[date].bool()
+            & torch.isfinite(target[date]) & torch.isfinite(prediction[date])
+        )
+        scores = prediction[date, valid]
+        truth = target[date, valid]
+        if scores.numel() < min_universe:
+            values.append(prediction[date].sum() * 0.0)
+            continue
+        top_count = max(scores.numel() // 10, 1)
+        ranked = torch.topk(scores.detach(), top_count + 1).values
+        threshold = (ranked[top_count - 1] + ranked[top_count]) * 0.5
+        score_scale = scores.detach().std(unbiased=False).clamp_min(1e-6)
+        weights = torch.sigmoid(
+            ((scores - threshold) / score_scale) / float(temperature)
+        )
+        top_return = (weights * truth).sum() / weights.sum().clamp_min(1e-6)
+        values.append(252.0 * (top_return - truth.mean()))
+    if not values:
+        return prediction.sum() * 0.0
+    return torch.stack(values).mean()
 
 
 def objective_settings(training: dict, epoch: int) -> ObjectiveSettings:
