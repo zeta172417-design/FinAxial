@@ -1,0 +1,92 @@
+{
+  "allow_adjacent_train_validation": false,
+  "boundary_excluded_date": 20231229,
+  "data": {
+    "factor_cache": "artifacts/reproduction/factors",
+    "factor_profile": "f128",
+    "feature_mode": "factors",
+    "invalid_fill": 0,
+    "normalization": "raw6_trailing64_zscore_plus_train_only_robust_factor_calibration",
+    "normalization_clip": 5,
+    "normalization_epsilon": 1e-05,
+    "train_stride": 32
+  },
+  "min_history": 32,
+  "model": {
+    "architecture": "interleaved_axial",
+    "attention_dropout": 0,
+    "attention_mode": "full",
+    "channels": 128,
+    "context_days": 0,
+    "d_model": 128,
+    "dropout": 0.1,
+    "ffn_dim": 512,
+    "head_mode": "dual",
+    "heads": 4,
+    "lookback": 64,
+    "output_steps": 256,
+    "return_scale": 0.02,
+    "stock_embedding_dim": 32,
+    "stock_id_dropout": 0.1,
+    "stock_layers": 2,
+    "temporal_layers": 2,
+    "temporal_window": 256
+  },
+  "protocol": "report_official_train_2018_2023_validate_2024",
+  "seed": 2026,
+  "swanlab": {
+    "enabled": false,
+    "fail_if_unavailable": false,
+    "log_interval_updates": 10,
+    "logdir": "artifacts/tracking",
+    "mode": "offline",
+    "project": "finaxial",
+    "upload_checkpoints": false
+  },
+  "train_panel": "artifacts/reproduction/panel",
+  "training": {
+    "checkpoint_policy": "last_epoch",
+    "cosine_eta_min_ratio": 0.01,
+    "excess_bound": 0.5,
+    "gradient_clip": 1,
+    "huber_delta": 0.5,
+    "huber_weight": 0.1,
+    "initialization": "random_from_scratch",
+    "learning_rate": 0.0003,
+    "loss_variant": "temperature_anneal",
+    "max_epochs": 20,
+    "mse_weight": 0,
+    "objective": "dual_rank_return",
+    "optimizer": "adamw",
+    "rank_temperature": 0.1,
+    "rank_temperature_end": 0.05,
+    "rank_temperature_start": 0.2,
+    "raw_checkpoint_policy": "last_epoch",
+    "return_scale": 0.02,
+    "return_target_clip": 5,
+    "route_name": "report-2024-f128-dual",
+    "selection_metric": "exact_rank_ic",
+    "temperature_anneal_end_epoch": 20,
+    "top_temperature": 0.02,
+    "top_temperature_end": 0.01,
+    "top_temperature_start": 0.04,
+    "validation_early_stopping": false,
+    "validation_ewma_alphas": [
+      1.0
+    ],
+    "validation_smoothing_epochs": 3,
+    "warmup_epochs": 5,
+    "weight_decay": 0.05
+  },
+  "tuning_train_end": 20231228,
+  "validation": {
+    "score_output_positions": [
+      128,
+      256
+    ]
+  },
+  "validation_days": 242,
+  "validation_end": 20241231,
+  "validation_role": "internal_temporal_holdout_fixed_protocol",
+  "validation_start": 20240102
+}

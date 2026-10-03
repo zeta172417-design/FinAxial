@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.venv/
+.deps/
+.pytest_cache/
+artifacts/
+data/
+*.csv
+*.log
+swanlog*/
+*.swanlab
+.DS_Store

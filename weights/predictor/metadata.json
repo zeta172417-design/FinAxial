@@ -1,0 +1,28 @@
+{
+  "architecture": {
+    "architecture": "interleaved_axial",
+    "attention_dropout": 0,
+    "attention_mode": "full",
+    "channels": 128,
+    "context_days": 0,
+    "d_model": 128,
+    "dropout": 0.1,
+    "ffn_dim": 512,
+    "head_mode": "dual",
+    "heads": 4,
+    "lookback": 64,
+    "output_steps": 256,
+    "return_scale": 0.02,
+    "stock_embedding_dim": 32,
+    "stock_id_dropout": 0.1,
+    "stock_layers": 2,
+    "temporal_layers": 2,
+    "temporal_window": 256
+  },
+  "checkpoint_selection": "last_completed_epoch",
+  "epoch": 20,
+  "return_scale": 0.02,
+  "stock_vocab_sha256": "6a45c674ce0b3e1c0015476fb47d37425a5dfac376064d5e6890924846b6a590",
+  "training_objective": "dual_rank_return",
+  "validation_used_for_checkpoint_selection": false
+}

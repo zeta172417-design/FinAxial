@@ -1,0 +1,26 @@
+{
+  "algorithm": "GRPO",
+  "files": {
+    "decision/metadata.json": {
+      "bytes": 1131,
+      "sha256": "98f648075cd4df90ffb2d7a206c7d7df9a49b2c7c534c6e733e567d48271c032"
+    },
+    "decision/policy.pt": {
+      "bytes": 126069,
+      "sha256": "8f0657364521e3de2da4ff414f206b1d4a37ed35e048c4872ed0148376467a32"
+    },
+    "factor_calibration.json": {
+      "bytes": 8284,
+      "sha256": "1865f5584479bddbb79cdfa89232b65bf73a182bddf84466b7018e4482c5ae90"
+    },
+    "predictor/metadata.json": {
+      "bytes": 757,
+      "sha256": "021277c88aea528ece10e8813bbcd2479a913fe9d691521011de1da362c0d280"
+    },
+    "predictor/model.pt": {
+      "bytes": 3940001,
+      "sha256": "76329085c08201dda2211fd0234ec580e5aebfbf1666140345de47079797afc1"
+    }
+  },
+  "model": "FinAxial E0"
+}

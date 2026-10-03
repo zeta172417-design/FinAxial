@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "finaxial"
+version = "1.0.0"
+description = "Dual-head axial Transformer and GRPO portfolio decision-maker"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.26", "pandas>=2.0", "scipy>=1.11"]
+
+[project.optional-dependencies]
+tracking = ["swanlab>=0.9"]
+
+[project.urls]
+Repository = "https://github.com/zeta172417-design/FinAxial"
+
+[tool.setuptools.packages.find]
+include = ["finmodel*"]

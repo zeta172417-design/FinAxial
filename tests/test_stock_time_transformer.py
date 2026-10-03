@@ -1,0 +1,269 @@
+import unittest
+from tempfile import TemporaryDirectory
+from pathlib import Path
+
+import numpy as np
+import torch
+
+from finmodel.models.stock_time_transformer import StockTimeTransformer
+from finmodel.objective import (
+    compose_bounded_final_score,
+    fixed_scale_excess_huber_loss,
+    multi_date_soft_components,
+    multi_date_soft_rank_ic,
+    objective_settings,
+    standardized_huber_loss,
+)
+from finmodel.sequence import (
+    causal_return_features,
+    cross_sectional_zscore,
+    rolling_causal_zscore,
+)
+
+
+def tiny_model(**overrides):
+    values = {
+        "stocks": 8,
+        "lookback": 8,
+        "output_steps": 3,
+        "d_model": 32,
+        "heads": 4,
+        "temporal_layers": 2,
+        "stock_layers": 2,
+        "ffn_dim": 64,
+        "stock_embedding_dim": 8,
+        "dropout": 0.0,
+        "attention_dropout": 0.0,
+        "stock_id_dropout": 0.0,
+    }
+    values.update(overrides)
+    return StockTimeTransformer(**values)
+
+
+class StockTimeTransformerTests(unittest.TestCase):
+    def test_rolling_normalization_is_future_independent(self):
+        rng = np.random.default_rng(7)
+        raw = rng.normal(size=(15, 4, 6)).astype(np.float32)
+        valid = np.ones((15, 4), dtype=bool)
+        expected, counts = rolling_causal_zscore(raw, valid, lookback=8)
+        changed = raw.copy()
+        changed[10:] += 1000.0
+        actual, changed_counts = rolling_causal_zscore(changed, valid, lookback=8)
+        np.testing.assert_allclose(expected[:10], actual[:10], rtol=0, atol=0)
+        np.testing.assert_array_equal(counts, changed_counts)
+
+    def test_output_shape_centering_and_shared_stock_parameters(self):
+        model = tiny_model().eval()
+        values = torch.randn(8, 10, 6)
+        token_valid = torch.ones(8, 10, dtype=torch.bool)
+        eligible = torch.ones(3, 8, dtype=torch.bool)
+        prediction = model(values, token_valid, eligible)
+        self.assertEqual(prediction.shape, (3, 8))
+        torch.testing.assert_close(prediction.mean(dim=1), torch.zeros(3), atol=1e-6, rtol=0)
+        names = [name for name, _ in model.named_parameters() if "stock_blocks.0.attention.qkv" in name]
+        self.assertEqual(names, [
+            "stock_blocks.0.attention.qkv.weight",
+            "stock_blocks.0.attention.qkv.bias",
+        ])
+
+    def test_sixteen_date_output_shape(self):
+        model = tiny_model(output_steps=16).eval()
+        sequence_length = model.lookback + model.output_steps - 1
+        values = torch.randn(8, sequence_length, 6)
+        token_valid = torch.ones(8, sequence_length, dtype=torch.bool)
+        eligible = torch.ones(16, 8, dtype=torch.bool)
+        prediction = model(values, token_valid, eligible)
+        self.assertEqual(prediction.shape, (16, 8))
+        torch.testing.assert_close(
+            prediction.mean(dim=1), torch.zeros(16), atol=1e-6, rtol=0,
+        )
+
+    def test_explicit_burnin_shape(self):
+        model = tiny_model(
+            lookback=8, context_days=4, temporal_window=8, output_steps=6,
+        ).eval()
+        self.assertEqual(model.sequence_length, 10)
+        prediction = model(
+            torch.randn(8, 10, 6),
+            torch.ones(8, 10, dtype=torch.bool),
+            torch.ones(6, 8, dtype=torch.bool),
+        )
+        self.assertEqual(prediction.shape, (6, 8))
+
+    def test_interleaved_axial_is_causal_and_parameter_matched(self):
+        torch.manual_seed(17)
+        stacked = tiny_model()
+        model = tiny_model(architecture="interleaved_axial").eval()
+        self.assertEqual(
+            sum(parameter.numel() for parameter in stacked.parameters()),
+            sum(parameter.numel() for parameter in model.parameters()),
+        )
+        values = torch.randn(8, 10, 6)
+        token_valid = torch.ones(8, 10, dtype=torch.bool)
+        eligible = torch.ones(3, 8, dtype=torch.bool)
+        expected = model(values, token_valid, eligible)
+        changed = values.clone()
+        changed[:, -1] += 1e4
+        actual = model(changed, token_valid, eligible)
+        torch.testing.assert_close(expected[:-1], actual[:-1], rtol=1e-5, atol=1e-5)
+
+    def test_activation_checkpointing_matches_forward_and_gradients(self):
+        torch.manual_seed(171)
+        options = dict(
+            architecture="interleaved_axial", head_mode="dual",
+            temporal_layers=4, stock_layers=4,
+        )
+        plain = tiny_model(**options).train()
+        checked = tiny_model(**options, activation_checkpointing=True).train()
+        checked.load_state_dict(plain.state_dict())
+        values = torch.randn(8, 10, 6)
+        valid = torch.ones(8, 10, dtype=torch.bool)
+        eligible = torch.ones(3, 8, dtype=torch.bool)
+        direct = plain(values, valid, eligible, return_heads=True)
+        replay = checked(values, valid, eligible, return_heads=True)
+        for expected, actual in zip(direct, replay):
+            torch.testing.assert_close(expected, actual, rtol=0, atol=0)
+        sum(value.square().mean() for value in direct).backward()
+        sum(value.square().mean() for value in replay).backward()
+        for (name, left), (_, right) in zip(
+            plain.named_parameters(), checked.named_parameters(), strict=True,
+        ):
+            torch.testing.assert_close(
+                left.grad, right.grad, rtol=1e-5, atol=1e-6,
+                msg=lambda message, name=name: f"{name}: {message}",
+            )
+
+    def test_future_token_cannot_change_earlier_predictions(self):
+        torch.manual_seed(9)
+        model = tiny_model().eval()
+        values = torch.randn(8, 10, 6)
+        token_valid = torch.ones(8, 10, dtype=torch.bool)
+        eligible = torch.ones(3, 8, dtype=torch.bool)
+        expected = model(values, token_valid, eligible)
+        changed = values.clone()
+        changed[:, -1] += 1e4
+        actual = model(changed, token_valid, eligible)
+        torch.testing.assert_close(expected[:-1], actual[:-1], rtol=1e-5, atol=1e-5)
+
+    def test_stock_permutation_equivariance(self):
+        torch.manual_seed(13)
+        model = tiny_model().eval()
+        values = torch.randn(8, 10, 6)
+        token_valid = torch.ones(8, 10, dtype=torch.bool)
+        eligible = torch.ones(3, 8, dtype=torch.bool)
+        expected = model(values, token_valid, eligible)
+        permutation = torch.randperm(8)
+        actual = model(
+            values[permutation], token_valid[permutation], eligible[:, permutation], permutation,
+        )
+        torch.testing.assert_close(actual, expected[:, permutation], rtol=1e-5, atol=1e-5)
+
+    def test_sequence_final_loss_is_finite_and_backpropagates(self):
+        prediction = torch.randn(3, 8, requires_grad=True)
+        target = torch.randn(3, 8) * 0.02
+        mask = torch.ones(3, 8, dtype=torch.bool)
+        components = multi_date_soft_components(prediction, target, mask, mask)
+        loss, score, excess = compose_bounded_final_score(
+            components,
+            global_rank_ic=components.rank_ic,
+            global_annual_excess_raw=components.annual_excess_raw,
+            global_stability=components.stability,
+        )
+        self.assertTrue(bool(torch.isfinite(torch.stack([loss, score, excess])).all()))
+        loss.backward()
+        self.assertTrue(torch.isfinite(prediction.grad).all())
+
+    def test_standardized_huber_is_scale_invariant_and_finite(self):
+        prediction = torch.randn(3, 8, requires_grad=True)
+        target = torch.randn(3, 8) * 0.02
+        mask = torch.ones(3, 8, dtype=torch.bool)
+        expected = standardized_huber_loss(prediction, target, mask)
+        actual = standardized_huber_loss(7.0 * prediction + 3.0, target, mask)
+        torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
+        expected.backward()
+        self.assertTrue(bool(torch.isfinite(prediction.grad).all()))
+
+    def test_rank_only_objective_is_finite_and_backpropagates(self):
+        prediction = torch.randn(3, 8, requires_grad=True)
+        target = torch.randn(3, 8) * 0.02
+        mask = torch.ones(3, 8, dtype=torch.bool)
+        rank_ic = multi_date_soft_rank_ic(prediction, target, mask)
+        self.assertTrue(bool(torch.isfinite(rank_ic)))
+        (-rank_ic).backward()
+        self.assertTrue(bool(torch.isfinite(prediction.grad).all()))
+
+    def test_fixed_scale_excess_huber_preserves_return_magnitude(self):
+        target = torch.tensor([
+            [0.01, 0.03, -0.01, 0.05],
+            [0.02, 0.00, 0.04, -0.02],
+        ])
+        mask = torch.ones_like(target, dtype=torch.bool)
+        market_mean = target.mean(dim=1, keepdim=True)
+        prediction = ((target - market_mean) / 0.02).requires_grad_()
+        loss = fixed_scale_excess_huber_loss(
+            prediction, target, mask, mask, return_scale=0.02,
+        )
+        self.assertAlmostEqual(float(loss.detach()), 0.0, places=7)
+        loss.backward()
+        self.assertTrue(bool(torch.isfinite(prediction.grad).all()))
+
+        shifted = target + torch.tensor([[0.1], [-0.2]])
+        shifted_loss = fixed_scale_excess_huber_loss(
+            prediction.detach(), shifted, mask, mask, return_scale=0.02,
+        )
+        self.assertAlmostEqual(float(shifted_loss), 0.0, places=6)
+
+    def test_feature_modes_are_causal_and_cross_sectional(self):
+        rng = np.random.default_rng(19)
+        raw = rng.uniform(1.0, 10.0, size=(12, 5, 6)).astype(np.float32)
+        valid = np.ones((12, 5), dtype=bool)
+        derived, derived_valid = causal_return_features(raw, valid)
+        changed = raw.copy()
+        changed[8:] *= 100.0
+        actual, actual_valid = causal_return_features(changed, valid)
+        np.testing.assert_allclose(derived[:8], actual[:8], rtol=0, atol=0)
+        np.testing.assert_array_equal(derived_valid, actual_valid)
+        temporal, _ = rolling_causal_zscore(raw, valid, lookback=4)
+        cross = cross_sectional_zscore(temporal, valid)
+        np.testing.assert_allclose(cross.mean(axis=1), 0.0, atol=2e-5)
+        self.assertTrue(np.isfinite(cross).all())
+
+    def test_loss_schedules_reach_the_official_objective(self):
+        base = {"rank_temperature": 0.1, "top_temperature": 0.02}
+        annealed = objective_settings({
+            **base, "loss_variant": "temperature_anneal",
+            "temperature_anneal_end_epoch": 20,
+        }, 20)
+        self.assertAlmostEqual(annealed.rank_temperature, 0.05)
+        self.assertAlmostEqual(annealed.top_temperature, 0.01)
+        early = objective_settings({
+            **base, "loss_variant": "turnover_curriculum",
+        }, 1)
+        late = objective_settings({
+            **base, "loss_variant": "turnover_curriculum",
+        }, 15)
+        self.assertEqual(early.component_weights, (0.6, 0.4, 0.0))
+        self.assertEqual(late.component_weights, (0.4, 0.3, 0.3))
+        balanced = objective_settings({
+            **base, "loss_variant": "range_balanced", "range_balance_beta": 0.1,
+        }, 1)
+        self.assertAlmostEqual(balanced.range_balance_beta, 0.1)
+
+    def test_checkpoint_round_trip_is_exact(self):
+        torch.manual_seed(23)
+        model = tiny_model().eval()
+        values = torch.randn(8, 10, 6)
+        token_valid = torch.ones(8, 10, dtype=torch.bool)
+        eligible = torch.ones(3, 8, dtype=torch.bool)
+        expected = model(values, token_valid, eligible)
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "model.pt"
+            torch.save(model.state_dict(), path)
+            restored = tiny_model().eval()
+            restored.load_state_dict(torch.load(path, map_location="cpu", weights_only=True))
+        actual = restored(values, token_valid, eligible)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+if __name__ == "__main__":
+    unittest.main()
