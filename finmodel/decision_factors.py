@@ -1,4 +1,4 @@
-"""Read-only, label-free factor sidecar for the D0 decision policy."""
+"""Read-only, label-free factor sidecar for the FinAxial decision policy."""
 
 from __future__ import annotations
 

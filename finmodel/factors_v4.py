@@ -73,7 +73,7 @@ def _compact_names() -> tuple[str, ...]:
 
 COMPACT_NAMES = _compact_names()
 
-# Keep the E0 raw OHLCVA channels and 256-day causal sequence unchanged. Only
+# Keep the FinAxial raw OHLCVA channels and 256-day causal sequence unchanged. Only
 # the *additional* predictor factors are limited to observations from 1–20
 # trading days, so this is an input-information ablation rather than a new
 # architecture or label definition.

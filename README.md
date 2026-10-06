@@ -2,7 +2,7 @@
 
 FinAxial 是一个两阶段的金融截面建模框架：双头轴向 Transformer 预测器学习股票排序与次日收益率，循环决策器通过 GRPO 学习收益差门槛和换股预算，在收益与持仓稳定性之间作出决策。
 
-本公开仓库仅维护最终 E0 模型及复现入口。已发布预测器、决策器、因子尺度校准参数和权重校验清单；不包含原始行情、外部标签、个人凭据、内部实验日志或实验分支。使用者需要自行合法获取数据。本项目不构成投资建议。
+本公开仓库仅维护 FinAxial 模型及复现入口。已发布预测器、决策器、因子尺度校准参数和权重校验清单；不包含原始行情、外部标签、个人凭据、内部实验日志或实验分支。使用者需要自行合法获取数据。本项目不构成投资建议。
 
 ## 模型结构
 
@@ -47,6 +47,8 @@ FinAxial 是一个两阶段的金融截面建模框架：双头轴向 Transforme
 
 决策器直接读取冻结预测器的hidden与两个输出，加上昨日持仓、持仓年龄等状态。margin比较的是预测收益率差，不是排序分数差；budget控制主动替换数量，被动替换按可交易性处理。没有alpha或EWMA。训练采样高斯动作；推理使用均值，并连续传递GRU、持仓与年龄。
 
+换入候选按原排序从高到低、原持仓按原排序从低到高配对，在budget允许的配对中逐一检查预测收益差是否超过margin。目标持仓确定后，仅将需要跨越Top10%边界的股票分数抬升／压低到边界附近，保留两组内部的原相对顺序及不必调整的分数。该局部投影尽量减少排序扰动，但不保证数学意义上最小的Rank IC损失。
+
 GRPO每日奖励为：
 
 ```text
@@ -54,7 +56,7 @@ GRPO每日奖励为：
               + 0.3 × 持仓Jaccard稳定性
 ```
 
-每天在64条轨迹内做优势标准化，不使用critic或参考KL惩罚。每次采集64条完整轨迹，分4批更新，每批16条、每条使用一次。训练预热32日＋计奖64日、步幅32、10 epoch；AdamW、LR `1e-4`、1 epoch warmup后cosine。初始margin为0.002、budget为100、动作标准差为0.4。验证／推理预热64日，预热不计分。所有训练统一保留最后完成epoch，不用验证集挑checkpoint或早停。
+每天在64条轨迹内做优势标准化，不使用critic或参考KL惩罚。每次采集64条完整轨迹，分4批更新，每批16条、每条使用一次。训练预热32日＋计奖64日、步幅32；AdamW、LR `1e-4`、1 epoch warmup后cosine。报告复现的决策器训练8 epoch；完整训练集发布权重保留原10 epoch。两套预测器与决策器均使用seed2026，报告复现另固定动作采样噪声seed2026。初始margin为0.002、budget为100、动作标准差为0.4。验证／推理预热64日，预热不计分。所有训练统一保留最后完成epoch，不用验证集挑checkpoint或早停。
 
 ## 安装与权重
 
@@ -76,6 +78,7 @@ weights/
 ├── predictor/model.pt、metadata.json
 ├── decision/policy.pt、metadata.json
 ├── factor_calibration.json
+├── score_calibration.json
 └── manifest.json
 ```
 
@@ -92,14 +95,14 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3
 bash scripts/reproduce.sh data/train.csv
 ```
 
-脚本顺序执行：面板 → 训练期因子校准 → 20 epoch预测器 → 冻结逐日缓存 → 10 epoch GRPO → 最后checkpoint验证。训练配置位于 `configs/predictor.json`、`configs/decision_grpo.json`；默认不启用外部日志服务。
+脚本顺序执行：面板 → 训练期因子校准 → 20 epoch预测器 → 冻结逐日缓存 → 8 epoch GRPO → 最后checkpoint验证。训练配置位于 `configs/predictor.json`、`configs/decision_grpo.json`；默认不启用外部日志服务。
 
-该固定协议的本地参考结果如下，仅属于训练集内部留出验证，不是未知标签测试集成绩：
+该配置的本地参考结果如下。2024年用于内部配置评估，不是独立盲测，也不是未知标签测试成绩：
 
 | 方法 | 总分 | Rank IC | 年化超额收益 | 换手率 |
 | --- | ---: | ---: | ---: | ---: |
 | 预测器直接排序 | 0.2607 | 0.1115 | 50.84% | 78.80% |
-| FinAxial预测器＋决策器 | 0.4331 | 0.1043 | 36.55% | 6.10% |
+| FinAxial预测器＋决策器 | 0.4523 | 0.1073 | 42.08% | 5.62% |
 
 无需获得测试集标签即可完成上述复现。由于股票身份词表、数据、依赖和硬件会影响结果，更换数据后不能预期复现相同数值。
 
@@ -116,6 +119,18 @@ python scripts/predict_final.py \
 ```
 
 使用其他长度的数据时删除或修改 `--expected-days`。输出严格为 `ts_code,trade_date,pred`，覆盖全部输入日期／股票键。344日×4,650只股票应为1,599,600行；伴随manifest记录模型哈希、覆盖率检查与无标签推理声明。`pred`是组合感知的排序分数，不是可直接解释为收益率的数值。
+
+若需要收益率尺度的提交数值，使用可选的导出校准：
+
+```bash
+python scripts/predict_final.py \
+  --history-panel artifacts/history --features data/test_features.csv \
+  --expected-days 344 --device cuda:0 \
+  --score-calibration weights/score_calibration.json \
+  --output artifacts/predictions_return_scale.csv
+```
+
+导出端执行全局正斜率仿射变换 `pred = a × decision_score + b`，发布参数为 `a=0.008105780947825202`、`b=-0.0038215032924382424`。参数仅用2018–2024训练期已知标签拟合，与发布权重哈希绑定；不使用推理期标签、不裁剪、不改收益头、margin或持仓。正斜率变换保持排名、Top10%及排名型评分，CSV采用17位有效数字以减少精度损失。它只是把组合排序信号校准到小数收益率尺度，并不是独立收益头的预测，也不保证未来收益幅度准确。内部留出验证若需校准，应另用该次训练子集拟合，不能直接使用这份全历史参数。
 
 冻结预测器以重叠窗口生成因果输出，决策器在整个推理期连续自回归运行，不按训练窗口重置。需要较多显存的预测器推荐在经过验证的PPU环境或具备足够显存的CUDA设备运行；`--device cpu`可用于小规模功能测试，无静默CPU回退。
 

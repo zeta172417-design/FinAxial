@@ -50,7 +50,7 @@ class DecisionValidationTests(unittest.TestCase):
         bridge = (torch.zeros(20, 1, 6), torch.ones(20, 1, dtype=torch.bool),
                   torch.ones(1, 20, dtype=torch.bool))
         with patch('finmodel.decision_validation.load_backbone', return_value=(backbone, {})), \
-             patch('finmodel.decision_validation.causal_c0_bridge_batch', return_value=bridge) as mocked:
+             patch('finmodel.decision_validation.causal_predictor_bridge_batch', return_value=bridge) as mocked:
             combined = with_validation_burnin(train, validation, panel, {}, torch.device('cpu'), 2)
             mocked.assert_called_once_with(panel, 3, {})
             np.testing.assert_allclose(combined.predicted_return[1], .03)
@@ -59,7 +59,7 @@ class DecisionValidationTests(unittest.TestCase):
             return backbone, {}
         before = torch.random.get_rng_state().clone()
         with patch('finmodel.decision_validation.load_backbone', side_effect=random_load), \
-             patch('finmodel.decision_validation.causal_c0_bridge_batch', return_value=bridge):
+             patch('finmodel.decision_validation.causal_predictor_bridge_batch', return_value=bridge):
             with_validation_burnin(train, validation, panel, {}, torch.device('cpu'), 2)
         torch.testing.assert_close(torch.random.get_rng_state(), before, rtol=0, atol=0)
         validation.manifest['backbone_sha256'] = 'different'

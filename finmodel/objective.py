@@ -130,6 +130,41 @@ def absolute_return_huber_loss(
     )
 
 
+def absolute_return_regression_loss(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor,
+    *,
+    loss_type: str = "huber",
+    return_scale: float = 0.02,
+    target_clip: float = 5.0,
+    delta: float = 0.5,
+) -> torch.Tensor:
+    """Keep Huber unchanged; an explicit MAE branch avoids the delta=0 trap.
+
+    MAE uses the same scaled predictions and clipped scaled labels as Huber.
+    An unnormalized Huber loss does not tend to MAE as delta tends to zero.
+    """
+    if loss_type == "huber":
+        return absolute_return_huber_loss(
+            prediction, target, mask, return_scale=return_scale,
+            target_clip=target_clip, delta=delta,
+        )
+    if loss_type != "mae":
+        raise ValueError(f"unknown absolute return loss: {loss_type}")
+    if prediction.ndim != 2 or target.shape != prediction.shape or mask.shape != prediction.shape:
+        raise ValueError("prediction, target and mask must be [dates, stocks]")
+    if return_scale <= 0 or target_clip <= 0:
+        raise ValueError("return scale and target clip must be positive")
+    valid = mask.bool() & torch.isfinite(target)
+    if not bool(valid.any()):
+        return prediction.sum() * 0.0
+    scaled_target = (target[valid] / float(return_scale)).clamp(
+        -float(target_clip), float(target_clip),
+    )
+    return F.l1_loss(prediction[valid] / float(return_scale), scaled_target)
+
+
 def multi_date_soft_rank_ic(
     prediction: torch.Tensor,
     target: torch.Tensor,

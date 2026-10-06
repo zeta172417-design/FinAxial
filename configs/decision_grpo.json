@@ -12,6 +12,9 @@
     "normalization_epsilon": 1e-05,
     "train_stride": 32
   },
+  "experiment": {
+    "rollout_noise_seed": 2026
+  },
   "min_history": 32,
   "model": {
     "architecture": "interleaved_axial",
@@ -92,9 +95,10 @@
     "gradient_clip": 1,
     "kl_coefficient": 0,
     "learning_rate": 0.0001,
-    "max_epochs": 10,
+    "lr_schedule_epochs": 8,
+    "max_epochs": 8,
     "minibatch_rollouts_per_rank": 4,
-    "minimum_epochs": 10,
+    "minimum_epochs": 8,
     "policy_burnin_days": 32,
     "policy_ratio_clip": 0.2,
     "policy_updates_per_rollout": 1,

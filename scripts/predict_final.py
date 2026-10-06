@@ -20,6 +20,7 @@ def main():
     parser.add_argument('--policy', default='weights/decision/policy.pt')
     parser.add_argument('--policy-metadata', default='weights/decision/metadata.json')
     parser.add_argument('--calibration', default='weights/factor_calibration.json')
+    parser.add_argument('--score-calibration', help='optional train-only positive affine export calibration JSON')
     parser.add_argument('--workdir', default='artifacts/inference')
     parser.add_argument('--output', default='artifacts/predictions.csv')
     parser.add_argument('--device', default='cuda:0')
@@ -33,7 +34,8 @@ def main():
     panel = Panel.open(build_inference_panel(args.history_panel, args.features, Path(args.workdir) / 'panel'))
     result = infer_final_model(panel=panel, config=config, policy_path=args.policy,
         policy_metadata=args.policy_metadata, calibration_path=args.calibration,
-        workdir=args.workdir, output=args.output, device=device, expected_days=args.expected_days)
+        workdir=args.workdir, output=args.output, device=device, expected_days=args.expected_days,
+        score_calibration_path=args.score_calibration)
     print(f'EXPORTED {len(result)} rows to {args.output}; no evaluation labels read')
 
 

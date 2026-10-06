@@ -1,4 +1,4 @@
-"""Label-free causal multi-scale market features for the C0 memory branch."""
+"""Label-free causal multi-scale market features for the predictor memory branch."""
 
 from __future__ import annotations
 

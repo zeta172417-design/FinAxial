@@ -1,4 +1,4 @@
-"""Read-only, date-indexed frozen C0 outputs for sequential decision learning."""
+"""Read-only, date-indexed frozen predictor outputs for sequential decision learning."""
 
 from __future__ import annotations
 
@@ -11,8 +11,8 @@ import numpy as np
 from .io import sha256_file
 
 
-CACHE_VERSION = "finaxial-c0-daily-fp32-v1"
-CACHE_VERSION_DUAL = "finaxial-c0-daily-fp32-dual-v2"
+CACHE_VERSION = "finaxial-predictor-daily-fp32-v1"
+CACHE_VERSION_DUAL = "finaxial-predictor-daily-fp32-dual-v2"
 
 
 @dataclass(frozen=True)
@@ -68,9 +68,9 @@ class DecisionFeatureCache:
         requested = np.asarray(dates, dtype=np.int64)
         rows = requested - int(self.date_indices[0])
         if not len(rows) or (rows < 0).any() or (rows >= len(self.date_indices)).any():
-            raise IndexError("requested dates are outside the C0 cache")
+            raise IndexError("requested dates are outside the predictor cache")
         if not np.array_equal(np.asarray(self.date_indices[rows]), requested):
-            raise ValueError("requested date indices do not match C0 cache")
+            raise ValueError("requested date indices do not match predictor cache")
         return rows
 
 

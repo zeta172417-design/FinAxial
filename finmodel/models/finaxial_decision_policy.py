@@ -280,7 +280,7 @@ class FinAxialDecisionPolicy(nn.Module):
             # Adding factors leaves the initial, untrained action policy unchanged.
             nn.init.zeros_(self.decision_factor_fusion.weight)
             nn.init.zeros_(self.decision_factor_fusion.bias)
-        # Six interpretable market/portfolio scalars accompany pooled C0 state.
+        # Six interpretable market/portfolio scalars accompany pooled predictor state.
         if self.observation_mode == "candidate_attention":
             # Encode only the held/high-scoring candidate union. The queries
             # attend to stocks, never to future dates or the whole N^2 universe.
@@ -305,7 +305,7 @@ class FinAxialDecisionPolicy(nn.Module):
                 nn.Tanh(),
             )
         elif self.observation_mode == "portfolio_detail":
-            # Read current-day, per-stock C0 state for held names and the high
+            # Read current-day, per-stock predictor state for held names and the high
             # ranked candidate set. The zero-initialized fusion preserves the
             # legacy action policy at initialization under an identical seed.
             with torch.random.fork_rng(devices=[]):
@@ -656,6 +656,10 @@ class FinAxialDecisionPolicy(nn.Module):
         return self._pool_detail_tokens(tokens, previous_selected[indices],
                                         recurrent_state=recurrent_state), indices
 
+    def _select_hysteresis(self, *args, **kwargs):
+        # Default delegation preserves published execution exactly.
+        return select_hysteresis(*args, **kwargs)
+
     def _encode_detail_tokens(self, raw_tokens: torch.Tensor) -> torch.Tensor:
         return self.detail_token_encoder(raw_tokens)
 
@@ -795,6 +799,7 @@ class FinAxialDecisionPolicy(nn.Module):
         actions: torch.Tensor | None, noise: torch.Tensor | None,
         capture_state: bool = False,
         anchor_selected: torch.Tensor | None = None,
+        execution_score: torch.Tensor | None = None,
     ) -> DecisionPolicyOutput:
         """Parallelize the neural policy over rollouts, keeping causal dates serial.
 
@@ -825,10 +830,16 @@ class FinAxialDecisionPolicy(nn.Module):
             raise ValueError("fixed actions cannot be combined with sampling/noise")
         trade = tradable.to(device=hidden.device, dtype=torch.bool)
         base_rank = static_cache.base_rank
+        # Observation features/cache keep the original two heads. Only the
+        # environment's ordering and portfolio projection use the optional mix.
+        execution_rank = (base_rank if execution_score is None else
+            percentile_rank_scores(execution_score.to(base_score), eligible))
         predicted_excess = static_cache.predicted_excess
         market_encoded = self.market_encoder(static_cache.market_hidden)
         recurrent = hidden.new_zeros((rollouts, self.recurrent.hidden_size))
-        previous_selected = static_cache.naive_selected[0].expand(rollouts, -1).clone()
+        initial_selected = (static_cache.naive_selected[0] if execution_score is None else
+            hard_top_fraction_mask(execution_rank[:1], trade[:1], self.top_fraction)[0])
+        previous_selected = initial_selected.expand(rollouts, -1).clone()
         holding_age = hidden.new_zeros((rollouts, stocks))
         std = self.policy_std.to(hidden)
         reference_mean = self.reference_action_mean.to(hidden)
@@ -909,13 +920,13 @@ class FinAxialDecisionPolicy(nn.Module):
                 budget = min(
                     budget, k if self.maximum_swap_budget is None else self.maximum_swap_budget,
                 )
-                desired = select_hysteresis(
-                    base_rank[date], today_trade, previous_selected[row],
+                desired = self._select_hysteresis(
+                    execution_rank[date], today_trade, previous_selected[row],
                     k=k, max_swaps=budget, margin=float(margin[row].item()),
                     predicted_return=(predicted_return[date]
                                       if self.margin_mode == "predicted_return" else None),
                 )
-                score = project_selection_to_scores(base_rank[date], desired, today_trade)
+                score = project_selection_to_scores(execution_rank[date], desired, today_trade)
                 selected = hard_top_fraction_mask(
                     score[None, :], today_trade[None, :], self.top_fraction,
                 )[0]
@@ -982,9 +993,22 @@ class FinAxialDecisionPolicy(nn.Module):
         rollouts: int = 1,
         capture_state: bool = False,
         anchor_selected: torch.Tensor | None = None,
+        execution_score: torch.Tensor | None = None,
     ) -> DecisionPolicyOutput:
+        """Observe original heads; optionally execute against a separate ranking.
+
+        Actual holdings/ages still feed back after execution. With a mix, future
+        actions can change because the portfolio changes, not because we replaced
+        the observed ranking/return forecasts. Default behavior is unchanged.
+        """
         if rollouts < 1:
             raise ValueError("rollouts must be positive")
+        if execution_score is not None:
+            if (self.action_mode != "hysteresis_no_alpha" or self.margin_mode != "predicted_return"
+                    or self.return_feature_mode != "explicit"):
+                raise ValueError("separate execution ranking requires the explicit-return two-action route")
+            if execution_score.shape != base_score.shape or not bool(torch.isfinite(execution_score).all()):
+                raise ValueError("execution_score must match base_score and be finite")
         if rollouts > 1:
             if static_cache is None or predicted_return is None or decision_factors is not None:
                 raise ValueError("batched rollouts require static cache and explicit returns")
@@ -995,6 +1019,7 @@ class FinAxialDecisionPolicy(nn.Module):
                 actions=actions, noise=noise,
                 capture_state=capture_state,
                 anchor_selected=anchor_selected,
+                execution_score=execution_score,
             )
         if anchor_selected is not None:
             raise ValueError("same-state branches require batched rollouts > 1")
@@ -1032,6 +1057,8 @@ class FinAxialDecisionPolicy(nn.Module):
             percentile_rank_scores(base_score, eligible)
             if static_cache is None else static_cache.base_rank
         )
+        execution_rank = (base_rank if execution_score is None else
+            percentile_rank_scores(execution_score.to(base_score), eligible))
         candidate_timeline = None
         if self.observation_mode == "candidate_attention":
             if observed_return is None:
@@ -1076,9 +1103,9 @@ class FinAxialDecisionPolicy(nn.Module):
         )
 
         actor_hidden = hidden.new_zeros(self.recurrent.hidden_size)
-        previous_score = base_rank[0].detach()
+        previous_score = execution_rank[0].detach()
         previous_selected = hard_top_fraction_mask(
-            base_rank[0:1], tradable[0:1], self.top_fraction,
+            execution_rank[0:1], tradable[0:1], self.top_fraction,
         )[0]
         holding_age = base_score.new_zeros(base_score.shape[1])
         std = self.policy_std.to(device=hidden.device, dtype=hidden.dtype)
@@ -1342,7 +1369,7 @@ class FinAxialDecisionPolicy(nn.Module):
                         ))
             current_signal = (
                 base_score[date] if self.action_mode == "swap_budget_raw"
-                else base_rank[date]
+                else execution_rank[date]
             )
             if self.action_mode in {"hysteresis_no_alpha", "hysteresis_margin_only"}:
                 # Current policies never smooth the predictor score.  Keep the
@@ -1374,7 +1401,7 @@ class FinAxialDecisionPolicy(nn.Module):
             if self.action_mode in {"swap_budget_only", "swap_budget_raw", "swap_budget_alpha", "hysteresis", "hysteresis_no_alpha", "hysteresis_margin_only", "candidate_residual"}:
                 count = min(max(int(trade.sum().item() * self.top_fraction), 1), int(trade.sum().item()))
                 if self.action_mode in {"hysteresis", "hysteresis_no_alpha", "hysteresis_margin_only", "candidate_residual"}:
-                    desired = select_hysteresis(
+                    desired = self._select_hysteresis(
                         base_decision_score, trade, previous_selected,
                         k=count, max_swaps=current_swap_budget, margin=float(margin.item()),
                         predicted_return=(predicted_return[date]

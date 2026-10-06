@@ -60,7 +60,7 @@
     "return_scale": 0.02,
     "top_fraction": 0.1
   },
-  "protocol": "e0_grpo_g64_burn32_reward64_validation_burn64_no_reference_kl",
+  "protocol": "finaxial_grpo_g64_burn32_reward64_validation_burn64_no_reference_kl",
   "seed": 2026,
   "swanlab": {
     "enabled": false,
@@ -101,7 +101,7 @@
     "raw_checkpoint_policy": "last_epoch",
     "rollout_execution": "cached_batched",
     "rollouts_per_rank": 16,
-    "route_name": "e0-grpo-g64-mainline",
+    "route_name": "finaxial-grpo-g64-mainline",
     "same_state_branches": false,
     "validation_early_stopping": false,
     "validation_smoothing_epochs": 2,

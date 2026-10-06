@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compute frozen C0 hidden and raw score once for each decision date."""
+"""Compute frozen predictor hidden and raw score once for each decision date."""
 
 from __future__ import annotations
 
@@ -106,7 +106,7 @@ def build_one(*, name, dataset, panel, backbone, output, checkpoint_hash, panel_
         "date_end": int(panel.dates[requested[-1]]),
         "dates": len(requested),
         "stocks": panel.shape[1],
-        "owner_selection": "largest_causal_position_within_overlapping_C0_windows",
+        "owner_selection": "largest_causal_position_within_overlapping_predictor_windows",
         "score_output_positions": [start, end],
         "elapsed_seconds": time.perf_counter() - started,
     }, output / "manifest.json")
@@ -202,7 +202,7 @@ def main():
     backbone, checkpoint_hash = load_backbone(config, panel, device)
     cache_hash, panel_hash = cache_source_hashes(panel, config["backbone_checkpoint"])
     if cache_hash != checkpoint_hash:
-        raise AssertionError("C0 checkpoint hash changed while loading")
+        raise AssertionError("predictor checkpoint hash changed while loading")
     datasets, validation_indices = build_cache_datasets(panel, config)
     score_positions = config.get("validation", {}).get("score_output_positions")
     for name, dataset in datasets.items():

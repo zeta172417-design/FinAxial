@@ -20,7 +20,11 @@
     "predictor/model.pt": {
       "bytes": 3940001,
       "sha256": "76329085c08201dda2211fd0234ec580e5aebfbf1666140345de47079797afc1"
+    },
+    "score_calibration.json": {
+      "bytes": 592,
+      "sha256": "f917b610431f01455b371042c38ae765d7bf1cd316e09413bbc600ad23d8c94c"
     }
   },
-  "model": "FinAxial E0"
+  "model": "FinAxial"
 }

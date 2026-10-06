@@ -83,6 +83,15 @@ class FinalInferenceTests(unittest.TestCase):
         self.assertEqual(len(reference), 60)
         self.assertEqual(list(reference.columns), ['ts_code', 'trade_date', 'pred'])
         self.assertEqual(reference.trade_date.max(), 20200123)
+        atomic_json_dump({'slope': .008, 'intercept': -.004, 'fit_date_end': 20200120,
+            'predictor_sha256': sha256_file(self.root / 'predictor.pt'),
+            'policy_sha256': sha256_file(self.root / 'policy.pt')}, self.root / 'score_calibration.json')
+        calibrated = infer_final_model(panel=panel, config=config, policy_path=self.root / 'policy.pt',
+            policy_metadata=self.root / 'policy.json', calibration_path=self.root / 'calibration.json',
+            workdir=self.root / 'calibrated', output=self.root / 'calibrated.csv', device=torch.device('cpu'),
+            expected_days=3, score_calibration_path=self.root / 'score_calibration.json')
+        np.testing.assert_allclose(calibrated.pred, reference.pred.to_numpy().astype(np.float64) * .008 - .004,
+                                   rtol=0, atol=0)
         writable = Panel.open(self.root / 'panel', mode='r+')
         writable.labels[:] = 999
         writable.label_valid[:] = True

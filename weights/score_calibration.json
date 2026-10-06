@@ -1,0 +1,16 @@
+{
+  "csv_precision": "%.17g",
+  "evaluation_labels_read": false,
+  "fit_date_end": 20241230,
+  "fit_date_start": 20180713,
+  "fit_days": 1570,
+  "fit_role": "training_in_sample_not_generalization_evidence",
+  "intercept": -0.0038215032924382424,
+  "method": "global_positive_affine_OLS",
+  "observations": 6317807,
+  "policy_sha256": "8f0657364521e3de2da4ff414f206b1d4a37ed35e048c4872ed0148376467a32",
+  "predictor_sha256": "76329085c08201dda2211fd0234ec580e5aebfbf1666140345de47079797afc1",
+  "replay_warmup_days": 64,
+  "slope": 0.008105780947825202,
+  "units": "decimal_next_day_return"
+}

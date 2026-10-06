@@ -16,6 +16,7 @@ from .models import build_decision_policy, stock_vocab_sha256
 from .panel import Panel, FEATURE_COLUMNS, KEY_COLUMNS, _causal_fill, _discover_axes
 from .pipeline import load_backbone
 from .sequence import MultiDateCrossSectionDataset
+from .score_calibration import apply_score_calibration, verify_order_preserved
 
 
 INFERENCE_VERSION = 'finaxial-label-free-inference-v1'
@@ -120,9 +121,9 @@ def inference_dataset(panel, config, factors, first, last):
 
 @torch.inference_mode()
 def infer_final_model(*, panel, config, policy_path, policy_metadata, calibration_path,
-                      workdir, output, device, expected_days=None):
+                      workdir, output, device, expected_days=None, score_calibration_path=None):
     """Infer every supplied X date, using action means and continuous decision state."""
-    from scripts.build_c0_decision_cache import build_one
+    from scripts.build_predictor_decision_cache import build_one
     from .decision_cache import DecisionFeatureCache, cache_source_hashes
     output = Path(output)
     if output.exists() or output.with_suffix(output.suffix + '.manifest.json').exists():
@@ -166,6 +167,17 @@ def infer_final_model(*, panel, config, policy_path, policy_metadata, calibratio
     for row in range(days):
         valid = np.asarray(cache.eligible[burnin + row]) & np.isfinite(scores[row])
         scores[row, ~valid] = np.median(scores[row, valid]) if valid.any() else 0.0
+    score_calibration = None
+    if score_calibration_path is not None:
+        score_calibration = json.loads(Path(score_calibration_path).read_text())
+        if (score_calibration['predictor_sha256'] != predictor_hash
+                or score_calibration['policy_sha256'] != sha256_file(policy_path)):
+            raise ValueError('export score calibration belongs to different model weights')
+        if int(score_calibration['fit_date_end']) >= int(panel.dates[first]):
+            raise ValueError('export score calibration must precede inference dates')
+        transformed = apply_score_calibration(scores, score_calibration)
+        verify_order_preserved(scores, transformed)
+        scores = transformed
     frame = pd.DataFrame({'ts_code': np.tile(panel.codes, days),
         'trade_date': np.repeat(panel.dates[first:], len(panel.codes)), 'pred': scores.reshape(-1)})
     if len(frame) != days * panel.shape[1] or frame[list(KEY_COLUMNS)].duplicated().any() or not np.isfinite(frame.pred).all():
@@ -174,13 +186,15 @@ def infer_final_model(*, panel, config, policy_path, policy_metadata, calibratio
     temporary = output.with_suffix(output.suffix + '.partial')
     if temporary.exists():
         raise FileExistsError(temporary)
-    frame.to_csv(temporary, index=False, float_format='%.10g')
+    frame.to_csv(temporary, index=False, float_format='%.17g')
     temporary.rename(output)
-    atomic_json_dump({'model': 'FinAxial E0', 'rows': len(frame), 'dates': days, 'stocks': panel.shape[1],
+    atomic_json_dump({'model': 'FinAxial', 'rows': len(frame), 'dates': days, 'stocks': panel.shape[1],
         'date_start': int(panel.dates[first]), 'date_end': int(panel.dates[-1]), 'decision_burnin_days': burnin,
         'predictor_sha256': predictor_hash, 'policy_sha256': sha256_file(policy_path),
         'calibration_sha256': sha256_file(calibration_path), 'csv_sha256': sha256_file(output),
         'evaluation_labels_read': False, 'final_feature_date_included': True,
-        'pred_semantics': 'portfolio-aware ranking score; not a calibrated return estimate'},
+        'score_calibration_sha256': sha256_file(score_calibration_path) if score_calibration else None,
+        'pred_semantics': ('positive affine training-calibrated portfolio score in decimal return units'
+                           if score_calibration else 'portfolio-aware ranking score; not a calibrated return estimate')},
         output.with_suffix(output.suffix + '.manifest.json'))
     return frame

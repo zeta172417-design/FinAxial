@@ -4,7 +4,7 @@ from dataclasses import replace
 import numpy as np
 import torch
 
-from .decision_history import causal_c0_bridge_batch
+from .decision_history import causal_predictor_bridge_batch
 from .pipeline import load_backbone
 
 
@@ -47,7 +47,7 @@ def with_validation_burnin(train, validation, panel, config, device, days):
         with torch.random.fork_rng(devices=rng_devices):
             backbone, _ = load_backbone(config, panel, device)
         for position, date in missing:
-            bridge = causal_c0_bridge_batch(panel, date, config)
+            bridge = causal_predictor_bridge_batch(panel, date, config)
             values, valid, eligible = [x.to(device) for x in bridge[:3]]
             hidden = backbone.encode_hidden(values, valid, eligible,
                 long_memory=bridge[3].to(device) if len(bridge) == 4 else None)

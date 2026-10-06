@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train the canonical FinAxial C0 model."""
+"""Train the canonical FinAxial predictor model."""
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ from finmodel.metrics import add_causal_ewma, evaluate_frame, make_prediction_fr
 from finmodel.models.stock_time_transformer import StockTimeTransformer, stock_vocab_sha256
 from finmodel.panel import Panel
 from finmodel.objective import (
-    absolute_return_huber_loss,
+    absolute_return_regression_loss,
     compose_bounded_final_score,
     fixed_scale_excess_huber_loss,
     multi_date_soft_components,
@@ -87,7 +87,7 @@ def save_checkpoint(
 ) -> None:
     save_torch_checkpoint(model, directory, {
         **metadata,
-        "model": "finaxial_c0",
+        "model": "finaxial_predictor",
         "architecture": architecture,
         "stock_vocab_sha256": vocabulary_hash,
     })
@@ -190,7 +190,7 @@ def distributed_validation(
             date_indices=requested,
             predictions=predictions,
             eligible=eligibility,
-            model="finaxial_c0",
+            model="finaxial_predictor",
             route=f"{route}_{suffix}",
             fold="validation",
             alpha=1.0,
@@ -272,6 +272,11 @@ def main() -> None:
     training = config["training"]
     use_last_checkpoint_policy(training)
     objective_name = str(training.get("objective", "multi_date_final_global_excess"))
+    return_loss_type = str(training.get("return_loss_type", "huber"))
+    if return_loss_type not in {"huber", "mae"}:
+        raise ValueError(f"unknown return loss type: {return_loss_type}")
+    if return_loss_type == "mae" and objective_name != "dual_rank_return":
+        raise ValueError("MAE ablation requires the dual Rank-IC/return objective")
     if objective_name not in {
         "multi_date_final_global_excess", "rank_ic_huber", "rank_ic_only",
         "rank_ic_excess_huber", "dual_rank_return", "return_huber",
@@ -435,14 +440,14 @@ def main() -> None:
 
     route = str(training["route_name"])
     name = job_name(
-        "training", "finaxial-c0", route,
+        "training", "finaxial-predictor", route,
         int(config["model"]["lookback"]), seed,
         budget=f"k{config['model']['output_steps']}-ep{epochs}-ddp{world_size}",
     )
     tracker_context = swan_settings(
         config,
         name=name,
-        tags=["training", "finaxial-c0", "multi-date",
+        tags=["training", "finaxial-predictor", "multi-date",
               "return-only" if objective_name == "return_huber" else "final-global"],
         extra={
             "world_size": world_size,
@@ -507,16 +512,18 @@ def main() -> None:
                         )
                         global_huber = global_mean_with_local_gradient(local_huber)
                     elif objective_name == "dual_rank_return":
-                        local_huber = absolute_return_huber_loss(
+                        local_huber = absolute_return_regression_loss(
                             return_prediction, target, label_mask,
+                            loss_type=return_loss_type,
                             return_scale=float(training["return_scale"]),
                             target_clip=float(training.get("return_target_clip", 5.0)),
                             delta=float(training.get("huber_delta", 0.5)),
                         )
                         global_huber = global_mean_with_local_gradient(local_huber)
                     elif objective_name == "return_huber":
-                        local_huber = absolute_return_huber_loss(
+                        local_huber = absolute_return_regression_loss(
                             prediction, target, label_mask,
+                            loss_type=return_loss_type,
                             return_scale=float(training["return_scale"]),
                             target_clip=float(training.get("return_target_clip", 5.0)),
                             delta=float(training.get("huber_delta", 0.5)),
@@ -686,7 +693,8 @@ def main() -> None:
                                     "train/soft_annual_excess_raw": means[4],
                                     "train/soft_annual_excess_bounded": means[5],
                                     "train/soft_one_minus_turnover": means[6],
-                                    "train/auxiliary_huber": means[8],
+                                    ("train/auxiliary_mae" if return_loss_type == "mae"
+                                     else "train/auxiliary_huber"): means[8],
                                     "train/rank_temperature": loss_settings.rank_temperature,
                                     "train/top_temperature": loss_settings.top_temperature,
                                     "train/rank_weight": loss_settings.component_weights[0],
@@ -831,6 +839,7 @@ def main() -> None:
                              "selection_scales": training.get("selection_scales") if selection_metric == "dual_weighted" else None,
                              "selection_mse_reference": training.get("selection_mse_reference") if selection_metric == "dual_weighted" else None,
                              "training_objective": objective_name,
+                             "return_loss_type": return_loss_type,
                              "return_scale": training.get("return_scale"),
                              "stable_validation_selection_value": stable,
                              "stable_validation_return_mse": -stable if selection_metric == "return_mse" else None,
@@ -866,6 +875,7 @@ def main() -> None:
                     "sequence_length": model.sequence_length,
                     "dates_per_global_update": world_size * int(config["model"]["output_steps"]),
                     "training_objective": objective_name,
+                    "return_loss_type": return_loss_type,
                     "top10_excess_weight": top10_excess_weight,
                     "head_mode": model.head_mode,
                     "attention_mode": model.attention_mode,

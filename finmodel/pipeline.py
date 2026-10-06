@@ -95,7 +95,7 @@ def score_numpy_predictions(
         date_indices=indices,
         predictions=predictions,
         eligible=eligible,
-        model="finaxial_c0_grpo",
+        model="finaxial_predictor_grpo",
         route=route,
         fold="temporal_holdout_validation",
         alpha=1.0,

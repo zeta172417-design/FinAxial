@@ -76,8 +76,8 @@ def observed_market_features(panel, date_indices: np.ndarray, *, scale: float = 
     return np.nan_to_num(result, nan=0.0, posinf=0.0, neginf=0.0)
 
 
-def causal_c0_bridge_batch(panel, date_index: int, config: dict) -> tuple[torch.Tensor, ...]:
-    """Construct one C0 window from X only; never inspect label values or masks."""
+def causal_predictor_bridge_batch(panel, date_index: int, config: dict) -> tuple[torch.Tensor, ...]:
+    """Construct one predictor window from X only; never inspect label values or masks."""
     model, data = config["model"], config["data"]
     feature_mode = data.get("feature_mode", "temporal")
     if feature_mode not in {"temporal", "factors"}:
@@ -88,7 +88,7 @@ def causal_c0_bridge_batch(panel, date_index: int, config: dict) -> tuple[torch.
     sequence_length = context_days + output_steps
     start = int(date_index) - sequence_length + 1
     if start < 0:
-        raise ValueError("not enough dates for the C0 bridge window")
+        raise ValueError("not enough dates for the predictor bridge window")
     normalization_start = max(0, start - lookback + 1)
     raw = np.asarray(panel.features[normalization_start:date_index + 1], dtype=np.float32)
     valid = np.asarray(panel.feature_valid[normalization_start:date_index + 1], dtype=bool)

@@ -1,4 +1,4 @@
-"""Exact daily score decomposition and value estimates for C0 decision RL."""
+"""Exact daily score decomposition and value estimates for predictor decision RL."""
 
 from __future__ import annotations
 

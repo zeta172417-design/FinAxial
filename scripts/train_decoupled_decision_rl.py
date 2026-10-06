@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare daily group advantages against value-based GAE/PPO on cached C0."""
+"""Compare daily group advantages against value-based GAE/PPO on cached predictor."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ from finmodel.decision_factors import (
     DECISION_FACTOR_PROFILES, DecisionFactorFeatureStore,
 )
 from finmodel.decision_history import (
-    causal_c0_bridge_batch, observed_market_features, observed_return_features,
+    causal_predictor_bridge_batch, observed_market_features, observed_return_features,
 )
 from finmodel.decision_rl import (
     DecisionStateValueHead,
@@ -124,12 +124,12 @@ def validation_history_prefix(train_cache, validation_cache, panel, config, devi
             gap_dates.append((position, int(date)))
     if gap_dates:
         if len(gap_dates) != 1 or int(panel.dates[gap_dates[0][1]]) != int(config["boundary_excluded_date"]):
-            raise ValueError("unexpected missing C0 score in validation history")
+            raise ValueError("unexpected missing predictor score in validation history")
         position, date = gap_dates[0]
         backbone, source_hash = load_backbone(config, panel, device)
         if source_hash != train_cache.manifest["backbone_sha256"]:
-            raise ValueError("validation bridge C0 checkpoint hash mismatch")
-        bridge = causal_c0_bridge_batch(panel, date, config)
+            raise ValueError("validation bridge predictor checkpoint hash mismatch")
+        bridge = causal_predictor_bridge_batch(panel, date, config)
         values, token_valid, bridge_eligible = bridge[:3]
         hidden = backbone.encode_hidden(
             values.to(device), token_valid.to(device), bridge_eligible.to(device),
@@ -153,7 +153,7 @@ def validation_history_prefix(train_cache, validation_cache, panel, config, devi
 @torch.inference_mode()
 def evaluate_cached(policy, cache, panel, device, *, route, base_metrics,
                     official_trade_universe=False, history_prefix=None, factor_store=None,
-                    score_prefix=0):
+                    score_prefix=0, execution_score=None):
     if score_prefix < 0 or score_prefix >= len(cache.date_indices):
         raise ValueError("invalid validation score prefix")
     policy.eval()
@@ -182,6 +182,7 @@ def evaluate_cached(policy, cache, panel, device, *, route, base_metrics,
     )
     output = policy(
         hidden, base, eligible, tradable, sample=False,
+        **({'execution_score': to_device(execution_score, device)} if execution_score is not None else {}),
         **history_kwargs, **return_kwargs,
         **({"decision_factors": to_device(factor_store.rows(np.asarray(cache.date_indices)), device)}
            if factor_store is not None else {}),
@@ -224,7 +225,7 @@ def evaluate_base(cache, panel):
         indices=np.asarray(cache.date_indices),
         predictions=np.asarray(cache.base_score, dtype=np.float32),
         eligible=np.asarray(cache.eligible, dtype=bool),
-        route="stage2_daily_cached_c0",
+        route="stage2_daily_cached_predictor",
         ewma_alphas=(1.0,),
     )
     return {"stage1_raw": base}
@@ -508,6 +509,8 @@ def main():
         Path(args.cache) / "validation", checkpoint_sha256=checkpoint_hash,
         panel_manifest_sha256=panel_hash,
     )
+    if config.get('execution_head_fusion') is not None:
+        raise ValueError('head fusion experiments have been retired; use the original rank head')
     if "decision_block_days" in training:
         blocks = decision_blocks_from_cache_dates(
             train_cache.date_indices,
@@ -602,8 +605,10 @@ def main():
         }, output_dir / "config_resolved.json")
     dist.barrier()
     reset_peak_memory(device)
-    total_updates = len(blocks) * epochs * updates_per_collection
-    warmup_updates = len(blocks) * int(training["warmup_epochs"]) * updates_per_collection
+    from finmodel.decision_schedule import decision_schedule_updates
+    lr_horizon, total_updates, warmup_updates = decision_schedule_updates(
+        training, epochs=epochs, blocks=len(blocks), updates_per_collection=updates_per_collection,
+    )
     run_action = action_mode if args.algorithm == "daily_group" else f"{action_mode}-{args.algorithm}"
     if history_days:
         run_action = f"{run_action}-history{history_days}"
@@ -622,7 +627,7 @@ def main():
     )
     tracker_context = swan_settings(
         config, name=name,
-        tags=["stage2", "daily-reward", "cached-c0", args.algorithm, action_mode],
+        tags=["stage2", "daily-reward", "cached-predictor", args.algorithm, action_mode],
         extra={
             "algorithm": args.algorithm,
             "action_mode": action_mode,
@@ -767,6 +772,7 @@ def main():
                         factor_store=factor_store,
                     )
                     hidden, base, eligible, tradable, target, label_mask, prefix, observed, return_prediction = block[:9]
+                    execution_kwargs = {}
                     decision_factors = block[9] if factor_store is not None else None
                     static_cache = (
                         policy.prepare_static(
@@ -811,12 +817,14 @@ def main():
                                 static_cache=static_cache, rollouts=rollouts_per_rank,
                                 capture_state=enhanced_critic,
                                 anchor_selected=anchor_selected,
+                                **execution_kwargs,
                                 **noise_kwargs,
                             ))
                         else:
                             sampled = [policy(
                                 hidden, base, eligible, tradable, sample=True,
                                 capture_state=enhanced_critic,
+                                **execution_kwargs,
                                 **({"observed_return": observed} if observed is not None else {}),
                                 **({"predicted_return": return_prediction}
                                    if return_prediction is not None else {}),
@@ -966,6 +974,7 @@ def main():
                                 predicted_return=return_prediction,
                                 static_cache=static_cache, rollouts=minibatch_rollouts_per_rank,
                                 anchor_selected=anchor_selected,
+                                **execution_kwargs,
                             )
                             log_ratio = (
                                 replay.log_prob[:, prefix:] - torch.stack([old_log_probs[row] for row in batch_indices])
@@ -999,6 +1008,7 @@ def main():
                                     replay = actor(
                                         hidden, base, eligible, tradable,
                                         actions=fixed_actions[rollout_index],
+                                        **execution_kwargs,
                                         **({"observed_return": observed} if observed is not None else {}),
                                         **({"predicted_return": return_prediction}
                                            if return_prediction is not None else {}),
@@ -1175,6 +1185,9 @@ def main():
                     "epochs_trained": history[-1]["epoch"],
                     "stage1_raw": base_metrics["stage1_raw"],
                     "optimizer_updates": global_update,
+                    "learning_rate_schedule_epochs": lr_horizon,
+                    "learning_rate_schedule_updates": total_updates,
+                    "learning_rate_warmup_updates": warmup_updates,
                     "train_blocks": len(blocks),
                     "validation_days": len(validation_cache.date_indices),
                     "validation_burnin_days": validation_burnin,
