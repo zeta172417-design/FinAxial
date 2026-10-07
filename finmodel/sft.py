@@ -90,7 +90,7 @@ def raw_checkpoint_policy(training: dict[str, Any], head_mode: str) -> str:
 
 
 def use_last_checkpoint_policy(training: dict[str, Any]) -> None:
-    """Apply the universal predictor/GRPO/PPO rule before recording config."""
+    """Apply the predictor/GRPO final-epoch rule before recording config."""
     training["checkpoint_policy"] = "last_epoch"
     training["raw_checkpoint_policy"] = "last_epoch"
     training["validation_early_stopping"] = False

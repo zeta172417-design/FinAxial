@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare daily group advantages against value-based GAE/PPO on cached predictor."""
+"""Train the GRPO decision policy on frozen predictor caches."""
 
 from __future__ import annotations
 
@@ -30,15 +30,8 @@ from finmodel.decision_factors import (
 from finmodel.decision_history import (
     causal_predictor_bridge_batch, observed_market_features, observed_return_features,
 )
-from finmodel.decision_rl import (
-    DecisionStateValueHead,
-    DecisionValueHead,
-    center_daily_rewards_against_group,
-    critic_observations,
-    discounted_return_to_go,
-    exact_daily_score,
-    generalized_advantage,
-)
+from finmodel.decision_rl import exact_daily_score
+
 from finmodel.io import atomic_json_dump, seed_everything
 from finmodel.models import build_decision_policy, stock_vocab_sha256
 from finmodel.panel import Panel
@@ -277,7 +270,9 @@ def group_normalize_by_date(values, epsilon, clip):
 
 def normalize_advantages(values, *, algorithm, epsilon, clip,
                          mode="legacy", scale_floor=0.0):
-    """Keep the legacy PPO normalization while enabling matched-date controls."""
+    """Normalize GRPO rewards without changing the mainline same-date formula."""
+    if algorithm != "daily_group":
+        raise ValueError("only the daily_group GRPO route is supported")
     if mode == "same_date_center_global_scale":
         if values.ndim != 2 or values.shape[0] < 2 or scale_floor < 0:
             raise ValueError("global-scale advantages need [rollouts >= 2, dates] and nonnegative floor")
@@ -285,8 +280,6 @@ def normalize_advantages(values, *, algorithm, epsilon, clip,
         scale = centered.std(unbiased=False).clamp_min(max(epsilon, scale_floor))
         return (centered / scale).clamp(-clip, clip)
     if mode == "none":
-        # Raw GAE: no centering, rescaling or advantage clipping. PPO's
-        # probability-ratio clipping and gradient clipping remain enabled.
         return values
     if mode == "global_rollout_date":
         if values.ndim != 2 or values.shape[0] < 2:
@@ -295,22 +288,12 @@ def normalize_advantages(values, *, algorithm, epsilon, clip,
                 values.std(unbiased=False).clamp_min(epsilon)).clamp(-clip, clip)
     if mode != "legacy":
         raise ValueError(f"unsupported advantage normalization mode: {mode}")
-    if algorithm == "ppo_gae":
-        return ((values - values.mean()) /
-                values.std(unbiased=False).clamp_min(epsilon)).clamp(-clip, clip)
     return group_normalize_by_date(values, epsilon, clip)
 
 
-def explained_variance(prediction, target, epsilon=1e-8):
-    """Value-fit diagnostic; zero when target variance is not informative."""
-    target_variance = target.float().var(unbiased=False)
-    if bool(target_variance <= epsilon):
-        return target.new_zeros(())
-    return 1.0 - (target.float() - prediction.float()).var(unbiased=False) / target_variance
-
 
 def split_batched_policy_output(output):
-    """Expose batched trajectory rows to the unchanged reward/critic code."""
+    """Expose batched trajectory rows to the unchanged daily-reward code."""
     count = output.raw_action.shape[0]
     return [type(output)(**{
         name: (getattr(output, name) if name == "policy_std" or getattr(output, name) is None
@@ -351,8 +334,6 @@ def main():
     parser.add_argument("--cache", default="artifacts/reproduction/cache")
     parser.add_argument("--output", required=True)
     parser.add_argument("--epochs", type=int)
-    parser.add_argument("--gamma", type=float, help="Override the configured reward discount")
-    parser.add_argument("--gae-lambda", type=float, help="Override the configured GAE lambda")
     parser.add_argument("--run-suffix", default="", help="Unique SwanLab name suffix for an ablation")
     parser.add_argument("--initial-hysteresis-margin", type=float,
                         help="Override the decision policy's initial margin")
@@ -424,42 +405,12 @@ def main():
         and history_days == 0
     ):
         raise ValueError("cached rollout execution supports only portfolio-detail two-action route")
-    critic_return_mode = str(training.get("critic_return_mode", "proxy"))
-    if critic_return_mode not in {"proxy", "predicted_return"}:
-        raise ValueError("critic_return_mode must be proxy or predicted_return")
-    if critic_return_mode == "predicted_return" and config["policy"].get("return_feature_mode") != "explicit":
-        raise ValueError("predicted_return critic requires an explicit dual-head return cache")
-    critic_target_mode = str(training.get("critic_target_mode", "raw"))
-    if critic_target_mode not in {"raw", "group_centered"}:
-        raise ValueError("critic_target_mode must be raw or group_centered")
-    if critic_target_mode == "group_centered" and args.algorithm not in {"ppo_gae", "ppo_gae_group"}:
-        raise ValueError("group-centered critic targets require PPO with a critic")
-    critic_observation_mode = str(training.get("critic_observation_mode", "legacy"))
-    if critic_observation_mode not in {"legacy", "portfolio_detail", "portfolio_detail_memory_age"}:
-        raise ValueError("unsupported critic_observation_mode")
-    enhanced_critic = critic_observation_mode == "portfolio_detail_memory_age"
-    if enhanced_critic and (rollout_execution != "cached_batched" or args.algorithm not in {"ppo_gae", "ppo_gae_group"}):
-        raise ValueError("memory/age critic requires cached_batched PPO")
     advantage_mode = str(training.get("advantage_normalization_mode", "legacy"))
     advantage_scale_floor = float(training.get("advantage_scale_floor", 0.0))
     if advantage_mode not in {"legacy", "same_date_center_global_scale", "none", "global_rollout_date"}:
         raise ValueError(f"unsupported advantage normalization mode: {advantage_mode}")
     if not np.isfinite(advantage_scale_floor) or advantage_scale_floor < 0:
         raise ValueError("advantage_scale_floor must be finite and non-negative")
-    if advantage_mode == "same_date_center_global_scale" and args.algorithm == "ppo_gae":
-        raise ValueError("same-date centering is incompatible with global PPO advantages")
-    if args.gamma is not None:
-        training["gamma"] = args.gamma
-    if args.gae_lambda is not None:
-        training["gae_lambda"] = args.gae_lambda
-    if not 0 <= float(training["gamma"]) <= 1 or not 0 <= float(training["gae_lambda"]) <= 1:
-        raise ValueError("gamma and GAE lambda must be in [0, 1]")
-    reward_horizon_days = training.get("reward_horizon_days")
-    if reward_horizon_days is not None:
-        if args.algorithm != "rtg_group" or isinstance(reward_horizon_days, bool) or not isinstance(reward_horizon_days, int):
-            raise ValueError("reward_horizon_days requires rtg_group and an integer horizon")
-        if not 1 <= reward_horizon_days <= int(training["decision_block_days"]):
-            raise ValueError("reward_horizon_days must fit within decision_block_days")
     if args.run_suffix and not re.fullmatch(r"[a-z0-9_-]+", args.run_suffix):
         raise ValueError("run suffix must contain only lowercase letters, digits, - or _")
     if world_size != int(training["expected_world_size"]):
@@ -563,32 +514,6 @@ def main():
         policy, device_ids=[local_rank], output_device=local_rank,
         broadcast_buffers=False, find_unused_parameters=False,
     )
-    critic = None
-    critic_ddp = None
-    critic_optimizer = None
-    if args.algorithm in {"ppo_gae", "ppo_gae_group"}:
-        if enhanced_critic:
-            critic = DecisionStateValueHead(
-                d_model=int(config["model"]["d_model"]),
-                hidden_dim=int(training["critic_hidden_dim"]),
-                recurrent_dim=policy.recurrent.hidden_size,
-                candidate_max_count=policy.candidate_max_count,
-                return_scale=policy.return_scale,
-            ).to(device)
-        else:
-            critic = DecisionValueHead(
-                d_model=int(config["model"]["d_model"]),
-                hidden_dim=int(training["critic_hidden_dim"]),
-                portfolio_detail=critic_observation_mode == "portfolio_detail",
-            ).to(device)
-        critic_ddp = DDP(
-            critic, device_ids=[local_rank], output_device=local_rank,
-            broadcast_buffers=False, find_unused_parameters=False,
-        )
-        critic_optimizer = torch.optim.AdamW(
-            critic_ddp.parameters(), lr=float(training["critic_learning_rate"]),
-            weight_decay=float(training["weight_decay"]),
-        )
     actor_optimizer = torch.optim.AdamW(
         actor.parameters(), lr=float(training["learning_rate"]),
         weight_decay=float(training["weight_decay"]),
@@ -609,7 +534,7 @@ def main():
     lr_horizon, total_updates, warmup_updates = decision_schedule_updates(
         training, epochs=epochs, blocks=len(blocks), updates_per_collection=updates_per_collection,
     )
-    run_action = action_mode if args.algorithm == "daily_group" else f"{action_mode}-{args.algorithm}"
+    run_action = action_mode
     if history_days:
         run_action = f"{run_action}-history{history_days}"
         if observation_mode != "mean_pool":
@@ -618,7 +543,7 @@ def main():
         run_action = f"{run_action}-{args.run_suffix}"
     advantage_normalization = (
         advantage_mode if advantage_mode in {"same_date_center_global_scale", "none", "global_rollout_date"}
-        else ("global_rollout_date" if args.algorithm == "ppo_gae" else "same_date_group")
+        else "same_date_group"
     )
     name = job_name(
         "rl", "finaxial-stage2-topk", run_action,
@@ -638,10 +563,7 @@ def main():
             "policy_passes_per_collection": updates_per_rollout,
             "optimizer_updates_per_collection": updates_per_collection,
             "train_blocks": len(blocks),
-            "critic_parameters": sum(p.numel() for p in critic.parameters()) if critic else 0,
             "advantage_normalization": advantage_normalization,
-            "critic_target_mode": critic_target_mode if critic is not None else None,
-            "critic_observation_mode": critic_observation_mode if critic is not None else None,
             "history_days": history_days,
             "observation_mode": observation_mode,
             "policy_parameters": sum(p.numel() for p in policy.parameters()),
@@ -706,18 +628,11 @@ def main():
                 best_dir = output_dir / "last"
                 best_dir.mkdir(exist_ok=True)
                 torch.save(policy.state_dict(), best_dir / "policy.pt")
-                if critic is not None:
-                    torch.save(critic.state_dict(), best_dir / "critic.pt")
                 atomic_json_dump({
                     "algorithm": args.algorithm,
                     "checkpoint_selection": "last_completed_epoch",
                     "validation_used_for_checkpoint_selection": False,
                     "action_mode": action_mode,
-                    "gamma": float(training["gamma"]),
-                    "gae_lambda": float(training["gae_lambda"]) if critic is not None else None,
-                    "critic_return_mode": critic_return_mode if critic is not None else None,
-                    "critic_target_mode": critic_target_mode if critic is not None else None,
-                    "critic_observation_mode": critic_observation_mode if critic is not None else None,
                     "advantage_normalization": advantage_normalization,
                     "history_days": history_days,
                     "observation_mode": observation_mode,
@@ -757,8 +672,6 @@ def main():
             for epoch in range(1, epochs + 1):
                 order = np.random.default_rng(seed + epoch).permutation(len(blocks))
                 policy.train()
-                if critic is not None:
-                    critic.train()
                 logged = []
                 for block_number, block_index in enumerate(order, start=1):
                     block = cached_block(
@@ -794,9 +707,7 @@ def main():
                             anchor_previous = torch.cat((
                                 static_cache.naive_selected[:1], anchor_selected[:-1],
                             ))[prefix:]
-                        rollouts, daily_rewards, critic_states = [], [], []
-                        critic_detail_states = []
-                        old_values, local_future, local_returns = [], [], []
+                        rollouts, daily_rewards = [], []
                         if rollout_execution == "cached_batched" and rollouts_per_rank > 1:
                             # Architecture-independent common random numbers.
                             # Mainline runs without this experimental setting
@@ -815,7 +726,6 @@ def main():
                                 hidden, base, eligible, tradable, sample=True,
                                 predicted_return=return_prediction,
                                 static_cache=static_cache, rollouts=rollouts_per_rank,
-                                capture_state=enhanced_critic,
                                 anchor_selected=anchor_selected,
                                 **execution_kwargs,
                                 **noise_kwargs,
@@ -823,7 +733,6 @@ def main():
                         else:
                             sampled = [policy(
                                 hidden, base, eligible, tradable, sample=True,
-                                capture_state=enhanced_critic,
                                 **execution_kwargs,
                                 **({"observed_return": observed} if observed is not None else {}),
                                 **({"predicted_return": return_prediction}
@@ -844,68 +753,10 @@ def main():
                             )
                             rollouts.append(output)
                             daily_rewards.append(reward)
-                            if critic is not None:
-                                obs = critic_observations(
-                                    hidden, base, eligible, tradable,
-                                    output.selected, output.decision_score,
-                                    predicted_return=(return_prediction
-                                                      if critic_return_mode == "predicted_return" else None),
-                                    return_scale=float(config["policy"]["return_scale"]),
-                                    top_fraction=float(config["policy"]["top_fraction"]),
-                                    portfolio_detail=critic_observation_mode != "legacy",
-                                )[prefix:]
-                                detail_state = {}
-                                if enhanced_critic:
-                                    if output.actor_state is None or output.pre_action_age is None:
-                                        raise RuntimeError("enhanced critic requires captured pre-action actor state")
-                                    previous_selected = torch.cat((
-                                        static_cache.naive_selected[:1], output.selected[:-1],
-                                    ))
-                                    detail_state = {
-                                        "hidden": hidden[prefix:],
-                                        "base_rank": static_cache.base_rank[prefix:],
-                                        "eligible": eligible[prefix:], "tradable": tradable[prefix:],
-                                        "predicted_return": (
-                                            return_prediction if critic_return_mode == "predicted_return"
-                                            else base * policy.return_scale
-                                        )[prefix:],
-                                        "previous_selected": previous_selected[prefix:],
-                                        "holding_age": output.pre_action_age[prefix:],
-                                        "actor_state": output.actor_state[prefix:],
-                                    }
-                                critic_detail_states.append(detail_state)
-                                value = critic(obs, **detail_state)
-                                critic_states.append(obs.detach())
-                                old_values.append(value.detach())
-                                if critic_target_mode == "raw":
-                                    gae, returns = generalized_advantage(
-                                        reward.reward, value,
-                                        gamma=float(training["gamma"]),
-                                        lam=float(training["gae_lambda"]),
-                                    )
-                                    local_future.append(gae.detach())
-                                    local_returns.append(returns.detach())
-                            elif args.algorithm == "rtg_group":
-                                local_future.append(discounted_return_to_go(
-                                    reward.reward, gamma=float(training["gamma"]),
-                                    horizon=reward_horizon_days,
-                                ).detach())
                         local_daily = torch.stack([row.reward for row in daily_rewards])
                         grouped = [torch.empty_like(local_daily) for _ in range(world_size)]
                         dist.all_gather(grouped, local_daily)
                         group_daily = torch.cat(grouped)
-                        if critic is not None and critic_target_mode == "group_centered":
-                            centered_rewards = center_daily_rewards_against_group(
-                                local_daily, group_daily,
-                            )
-                            for reward_row, value in zip(centered_rewards, old_values):
-                                gae, returns = generalized_advantage(
-                                    reward_row, value,
-                                    gamma=float(training["gamma"]),
-                                    lam=float(training["gae_lambda"]),
-                                )
-                                local_future.append(gae.detach())
-                                local_returns.append(returns.detach())
                         local_action_values = torch.stack([
                             row.action_value[prefix:] for row in rollouts
                         ])
@@ -921,16 +772,7 @@ def main():
                         rollout_action_std = group_action_values.std(
                             dim=0, unbiased=False,
                         ).mean(dim=0)
-                        if args.algorithm == "daily_group":
-                            all_advantage = group_daily
-                        else:
-                            local_raw_future = torch.stack(local_future)
-                            gathered_future = [
-                                torch.empty_like(local_raw_future)
-                                for _ in range(world_size)
-                            ]
-                            dist.all_gather(gathered_future, local_raw_future)
-                            all_advantage = torch.cat(gathered_future)
+                        all_advantage = group_daily
                         group_advantage = normalize_advantages(
                             all_advantage, algorithm=args.algorithm,
                             epsilon=float(training["advantage_epsilon"]),
@@ -944,14 +786,6 @@ def main():
                         between_date_advantage_std = all_advantage.mean(
                             dim=0,
                         ).std(unbiased=False)
-                        if critic is not None:
-                            critic_explained_variance = explained_variance(
-                                torch.stack(old_values), torch.stack(local_returns),
-                            )
-                            critic_target_std = torch.stack(local_returns).std(unbiased=False)
-                        else:
-                            critic_explained_variance = local_daily.new_zeros(())
-                            critic_target_std = local_daily.new_zeros(())
                         local_advantage = group_advantage[
                             rank * rollouts_per_rank:(rank + 1) * rollouts_per_rank
                         ].detach()
@@ -1057,38 +891,8 @@ def main():
                             group["lr"] = actor_lr
                         actor_optimizer.step()
 
-                        critic_loss = torch.zeros((), device=device)
-                        if critic_ddp is not None:
-                            critic_optimizer.zero_grad(set_to_none=True)
-                            value_losses = []
-                            for batch_position, rollout_index in enumerate(batch_indices):
-                                context = critic_ddp.no_sync() if batch_position + 1 < minibatch_rollouts_per_rank else nullcontext()
-                                with context:
-                                    estimate = critic_ddp(
-                                        critic_states[rollout_index], **critic_detail_states[rollout_index],
-                                    )
-                                    value_loss = torch.nn.functional.mse_loss(
-                                        estimate, local_returns[rollout_index],
-                                    )
-                                    (float(training["value_coefficient"])
-                                     * value_loss / minibatch_rollouts_per_rank).backward()
-                                value_losses.append(value_loss.detach())
-                            critic_norm = torch.nn.utils.clip_grad_norm_(
-                                critic_ddp.parameters(), float(training["gradient_clip"]),
-                            )
-                            critic_loss = torch.stack(value_losses).mean()
-                            for group in critic_optimizer.param_groups:
-                                group["lr"] = actor_lr * (
-                                    float(training["critic_learning_rate"])
-                                    / float(training["learning_rate"])
-                                )
-                            critic_optimizer.step()
-                        else:
-                            critic_norm = torch.zeros((), device=device)
-
                         local_metrics = torch.stack((
                             torch.stack(actor_losses).mean(),
-                            critic_loss,
                             local_daily.mean(),
                             torch.stack([row.rank_ic.mean() for row in daily_rewards]).mean(),
                             torch.stack([row.annual_excess.mean() for row in daily_rewards]).mean(),
@@ -1099,10 +903,7 @@ def main():
                             torch.stack([row.swap_budget[prefix:].mean() for row in rollouts]).mean(),
                             torch.stack([row.realized_swaps[prefix:].mean() for row in rollouts]).mean(),
                             torch.as_tensor(actor_norm, device=device),
-                            torch.as_tensor(critic_norm, device=device),
                             torch.stack(clip_fractions).mean(),
-                            critic_explained_variance,
-                            critic_target_std,
                             within_date_advantage_std,
                             between_date_advantage_std,
                             rollout_reward_std,
@@ -1123,29 +924,25 @@ def main():
                                 mean = np.mean(logged, axis=0)
                                 tracker.log({
                                     "train/actor_loss": mean[0],
-                                    "train/critic_loss": mean[1],
-                                    "train/daily_final_reward": mean[2],
-                                    "train/daily_rank_ic": mean[3],
-                                    "train/daily_annual_excess": mean[4],
-                                    "train/daily_stability": mean[5],
-                                    "train/policy_ratio": mean[6],
-                                    "train/reference_kl": mean[7],
-                                    "train/advantage_std": mean[8],
-                                    "train/swap_budget_mean": mean[9],
-                                    "train/realized_swaps_mean": mean[10],
-                                    "train/actor_grad_norm": mean[11],
-                                    "train/critic_grad_norm": mean[12],
-                                    "train/policy_clip_fraction": mean[13],
-                                    "train/critic_explained_variance": mean[14],
-                                    "train/critic_target_std": mean[15],
-                                    "train/advantage_within_date_std": mean[16],
-                                    "train/advantage_between_date_std": mean[17],
-                                    "train/rollout_reward_std_same_date": mean[18],
-                                    "train/rollout_margin_std": mean[19],
-                                    "train/rollout_budget_std": mean[20],
-                                    "train/approx_kl_to_rollout_policy": mean[21],
-                                    "train/rollout_margin_mean": mean[22],
-                                    "train/rollout_budget_mean": mean[23],
+                                    "train/daily_final_reward": mean[1],
+                                    "train/daily_rank_ic": mean[2],
+                                    "train/daily_annual_excess": mean[3],
+                                    "train/daily_stability": mean[4],
+                                    "train/policy_ratio": mean[5],
+                                    "train/reference_kl": mean[6],
+                                    "train/advantage_std": mean[7],
+                                    "train/swap_budget_mean": mean[8],
+                                    "train/realized_swaps_mean": mean[9],
+                                    "train/actor_grad_norm": mean[10],
+                                    "train/policy_clip_fraction": mean[11],
+                                    "train/advantage_within_date_std": mean[12],
+                                    "train/advantage_between_date_std": mean[13],
+                                    "train/rollout_reward_std_same_date": mean[14],
+                                    "train/rollout_margin_std": mean[15],
+                                    "train/rollout_budget_std": mean[16],
+                                    "train/approx_kl_to_rollout_policy": mean[17],
+                                    "train/rollout_margin_mean": mean[18],
+                                    "train/rollout_budget_mean": mean[19],
                                     "train/actor_lr": actor_lr,
                                     "train/epoch": epoch,
                                     "train/optimizer_update": global_update,
@@ -1171,11 +968,6 @@ def main():
                     "last_score_components": best["policy_raw"],
                     "last_policy_diagnostics": best["diagnostics"],
                     "action_mode": action_mode,
-                    "gamma": float(training["gamma"]),
-                    "gae_lambda": float(training["gae_lambda"]) if critic is not None else None,
-                    "critic_return_mode": critic_return_mode if critic is not None else None,
-                    "critic_target_mode": critic_target_mode if critic is not None else None,
-                    "critic_observation_mode": critic_observation_mode if critic is not None else None,
                     "advantage_normalization": advantage_normalization,
                     "history_days": history_days,
                     "observation_mode": observation_mode,

@@ -84,7 +84,7 @@ class DecisionPolicyOutput(NamedTuple):
     realized_swaps: torch.Tensor
     candidate_bonus_abs_mean: torch.Tensor
     candidate_count: torch.Tensor
-    # Optional pre-action state for a detached critic; no new actor parameters.
+    # Optional causal pre-action state capture; no new actor parameters.
     actor_state: torch.Tensor | None = None
     pre_action_age: torch.Tensor | None = None
 
@@ -1475,9 +1475,8 @@ class FinAxialDecisionPolicy(nn.Module):
             hold_temperature=torch.stack(hold_temperatures),
             action_mean=torch.stack(means),
             action_value=torch.stack(action_values),
-            # Keep one joint action log probability per date. PPO ratios over
-            # a full trajectory would otherwise exponentiate dozens of terms
-            # and saturate the clip after the first optimizer step.
+            # Keep one joint action log probability per date; multiplying a
+            # full trajectory's ratios would saturate probability clipping.
             log_prob=torch.stack(log_prob_rows),
             entropy=entropy_sum / dates,
             reference_kl=kl_sum / dates,
