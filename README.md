@@ -115,30 +115,34 @@ python scripts/preprocess.py --source data/train.csv --output artifacts/history
 python scripts/predict_final.py \
   --history-panel artifacts/history --features data/test_features.csv \
   --expected-days 344 --device cuda:0 \
-  --output artifacts/predictions.csv
+  --score-calibration weights/score_calibration.json \
+  --output artifacts/submission.csv
 ```
 
-使用其他长度的数据时删除或修改 `--expected-days`。输出严格为 `ts_code,trade_date,pred`，覆盖全部输入日期／股票键。344日×4,650只股票应为1,599,600行；伴随manifest记录模型哈希、覆盖率检查与无标签推理声明。`pred`是组合感知的排序分数，不是可直接解释为收益率的数值。
+使用其他长度的数据时删除或修改 `--expected-days`。输出严格为 `ts_code,trade_date,pred`，覆盖全部输入日期／股票键，包括最后一天。344日×4,650只股票应为1,599,600行；伴随manifest记录模型哈希、覆盖率检查与无标签推理声明。上述命令导出的 `pred` 已按训练标签校准为小数收益率尺度，不是Rank IC指标，也不是独立收益头的直接输出。
 
-若需要收益率尺度的提交数值，使用可选的导出校准：
+也可以先导出原始排序信号，再在CPU上执行校准与完整格式核查：
 
 ```bash
 python scripts/predict_final.py \
   --history-panel artifacts/history --features data/test_features.csv \
   --expected-days 344 --device cuda:0 \
-  --score-calibration weights/score_calibration.json \
-  --output artifacts/predictions_return_scale.csv
+  --output artifacts/raw_predictions.csv
+python scripts/calibrate_submission.py \
+  --raw artifacts/raw_predictions.csv --features data/test_features.csv \
+  --calibration weights/score_calibration.json \
+  --expected-days 344 --output artifacts/submission.csv
 ```
 
 导出端执行全局正斜率仿射变换 `pred = a × decision_score + b`，发布参数为 `a=0.008105780947825202`、`b=-0.0038215032924382424`。参数仅用2018–2024训练期已知标签拟合，与发布权重哈希绑定；不使用推理期标签、不裁剪、不改收益头、margin或持仓。正斜率变换保持排名、Top10%及排名型评分，CSV采用17位有效数字以减少精度损失。它只是把组合排序信号校准到小数收益率尺度，并不是独立收益头的预测，也不保证未来收益幅度准确。内部留出验证若需校准，应另用该次训练子集拟合，不能直接使用这份全历史参数。
 
-冻结预测器以重叠窗口生成因果输出，决策器在整个推理期连续自回归运行，不按训练窗口重置。需要较多显存的预测器推荐在经过验证的PPU环境或具备足够显存的CUDA设备运行；`--device cpu`可用于小规模功能测试，无静默CPU回退。
+冻结预测器以重叠窗口生成因果输出，决策器在整个推理期连续自回归运行，不按训练窗口重置。窗口对齐、状态预热与可评分日期均需固定；扩大日期范围时重新切窗口可能改变原有日期的模型信号，不能把这种差异归因于输出校准。已发布的逐日信号应保持固定，新增日期延续决策状态；对同一份原始信号施加正斜率校准时，排序型指标保持不变。需要较多显存的预测器推荐在经过验证的PPU环境或具备足够显存的CUDA设备运行；`--device cpu`可用于小规模功能测试，无静默CPU回退。
 
 若自行持有合法标签，可以独立评分：
 
 ```bash
 python scripts/evaluate_predictions.py \
-  --predictions artifacts/predictions.csv \
+  --predictions artifacts/submission.csv \
   --features data/test_features.csv --labels data/evaluation_labels.csv
 ```
 
